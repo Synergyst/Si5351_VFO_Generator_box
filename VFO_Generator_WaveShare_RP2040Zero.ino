@@ -109,6 +109,21 @@ void handleCommand(const char* line) {
     time_now = millis();
     return;
   }
+  if (!strcmp(line, "READY")) {
+    Serial.println("RP2040Zero: got READY from Nano MCU");
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "READY?")) {
+    Serial1.print("READY?\n");
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "PING")) {
+    Serial1.print("PING\n");
+    time_now = millis();
+    return;
+  }
 
   // KEY [VALUE] numeric
   char key[8] = { 0 };
@@ -149,7 +164,7 @@ void handleCommand(const char* line) {
     }
   }
   // Unknown command -> optionally report over USB
-  Serial.print("Unknown cmd: ");
+  Serial.print("RP2040Zero: Unknown cmd: ");
   Serial.println(line);
 }
 void set_frequency(short dir) {
@@ -170,7 +185,7 @@ void set_frequency(short dir) {
 void setup() {
   Serial.begin(BAUD);   // USB CDC for debug
   Serial1.begin(BAUD);  // HW UART to Nano
-  delay(10000);
+  //delay(10000);
   Serial.println("RP2040Zero: Starting now..");
   strip.begin();
   strip.show();
@@ -188,17 +203,61 @@ void setup() {
   display.setTextColor(WHITE);
   display.display();
   display.setTextSize(1);
+  display.setCursor(10, 32);
+  display.println("Ensure power switch");
+  display.setCursor(48, 42);
+  display.print("is on!");
+  display.display();
+  display.setCursor(0, 0);
+  display.print("RP2040 I2C device(s):");
+  display.setCursor(0, 12);
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       Serial.print("RP2040Zero: Detected I2C device on bus: 0x");
       Serial.println(addr, HEX);
+      display.print("0x");
       display.print(addr, HEX);
       display.print(" ");
       display.display();
     }
   }
   delay(750);
+  display.setCursor(0, 0);
+  display.clearDisplay();
+  display.print("Waiting for Nano..");
+  display.display();
+  bool nanoReady = false;
+  while (!nanoReady) {
+    if (readLine(Serial1, s1Buf, s1Len, CMD_BUF_SZ)) {
+      if (s1Buf[0] == '\0') return;
+      if (!strcmp(s1Buf, "PONG")) {
+        Serial.println("RP2040Zero: Nano is alive..");
+        time_now = millis();
+        nanoReady = true;
+        display.setCursor(0, 0);
+        display.clearDisplay();
+        display.print("Nano is awake");
+        display.display();
+        delay(500);
+        break;
+      }
+      // Unknown command -> optionally report over USB
+      Serial.print("RP2040Zero: Unknown cmd: ");
+      Serial.println(s1Buf);
+    }
+    delay(50);
+    Serial1.print("P");
+    delay(50);
+    Serial1.print("I");
+    delay(50);
+    Serial1.print("N");
+    delay(50);
+    Serial1.print("G");
+    delay(50);
+    Serial1.print("\n");
+    delay(50);
+  }
   Serial.println("RP2040Zero: Running loop now..\n");
 }
 void loop() {
