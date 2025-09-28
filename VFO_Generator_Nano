@@ -161,6 +161,11 @@ void handleInboundFromRP(const char* line) {
     sendToken("PONG");
     return;
   }
+  if (!strcmp(line, "READY?")) {
+    delay(1000);
+    rplog("READY\n", rp);
+    return;
+  }
   if (!strcmp(line, "OK")) {
     // end of state-dump; nothing special to do
     return;
@@ -230,6 +235,7 @@ void setup() {
   pinMode(band, INPUT_PULLUP);
   pinMode(rx_tx, INPUT_PULLUP);
   rp.begin(BAUD);
+  rplog("PONG\n", rp);
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
   si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
   si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
