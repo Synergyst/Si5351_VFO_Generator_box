@@ -1,7 +1,6 @@
 #include <Adafruit_SSD1306.h>  // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
-
 #define LED_PIN 16
 #define LED_COUNT 1
 #define IS_RGBW true
@@ -10,14 +9,12 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
 #else
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #endif
-
 //------------------------------------------------------------------------------------------------------------
-#define IF 10700  // IF in kHz
+#define IF 10590  // IF in kHz
 #define BAND_INIT 20
-#define XT_CAL_F 33000
+#define XT_CAL_F 0
 #define S_GAIN 505
 #define BAUD 9600
-
 unsigned long freq, freqold, fstep;
 long interfreq = IF, interfreqold = 0;
 long cal = XT_CAL_F;
@@ -28,14 +25,11 @@ byte count, x, xo;
 bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
-
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
-
 // --------- Line Reader (newline-terminated) ----------
 static const size_t CMD_BUF_SZ = 64;
 static char s1Buf[CMD_BUF_SZ];
 static size_t s1Len = 0;
-
 bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   while (s.available()) {
     char c = (char)s.read();
@@ -56,7 +50,6 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   }
   return false;
 }
-
 // --------- Command handlers ----------
 inline void s1SendKV(const char* key, long val) {
   Serial1.print(key);
@@ -75,7 +68,6 @@ void sendStateToNano() {
 }
 void handleCommand(const char* line) {
   if (line[0] == '\0') return;
-
   // Single-letter commands
   if (!strcmp(line, "Q")) {
     sendStateToNano();
@@ -101,6 +93,7 @@ void handleCommand(const char* line) {
     delay(300);
     return;
   }
+
   if (!strcmp(line, "TX")) {
     sts = 1;
     time_now = millis();  // cause UI refresh soon
@@ -108,6 +101,11 @@ void handleCommand(const char* line) {
   }
   if (!strcmp(line, "RX")) {
     sts = 0;
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "OK")) {
+    Serial.println("RP2040Zero: got OK from Nano MCU");
     time_now = millis();
     return;
   }
@@ -139,14 +137,21 @@ void handleCommand(const char* line) {
       x = (byte)val;
       time_now = millis();
       return;
+    } else if (!strcmp(key, "OK-F") && matched == 2) {
+      Serial.printf("RP2040Zero: OK-F %u\n", (long)val);
+      // Frequency in Hz
+      /*if (val < 10000) val = 10000;
+      if ((unsigned long)val > 225000000UL) val = 225000000UL;
+      freq = (unsigned long)val;*/
+      // ensure immediate update on next loop
+      time_now = millis();
+      return;
     }
   }
-
   // Unknown command -> optionally report over USB
   Serial.print("Unknown cmd: ");
   Serial.println(line);
 }
-
 void set_frequency(short dir) {
   if (encoder == 1) {  // Up/Down frequency
     if (dir == 1) freq = freq + fstep;
@@ -162,33 +167,27 @@ void set_frequency(short dir) {
     if (n < 1) n = 42;
   }
 }
-
 void setup() {
   Serial.begin(BAUD);   // USB CDC for debug
   Serial1.begin(BAUD);  // HW UART to Nano
   delay(10000);
   Serial.println("RP2040Zero: Starting now..");
-
   strip.begin();
   strip.show();
   strip.setBrightness(255);
   strip.setPixelColor(0, 255, 96, 128);
   strip.show();
-
   Wire.setClock(100000);
   Wire.begin();
-
   count = BAND_INIT;
   bandpresets();
   stp = 4;
   setstep();
-
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.display();
   display.setTextSize(1);
-
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
@@ -202,13 +201,15 @@ void setup() {
   delay(750);
   Serial.println("RP2040Zero: Running loop now..\n");
 }
-
 void loop() {
   // Read complete commands from Nano on Serial1 (newline-terminated)
   if (readLine(Serial1, s1Buf, s1Len, CMD_BUF_SZ)) {
     handleCommand(s1Buf);
   }
-
+  // Read complete commands from RP2040Zero's USB on Serial (newline-terminated)
+  if (readLine(Serial, s1Buf, s1Len, CMD_BUF_SZ)) {
+    handleCommand(s1Buf);
+  }
   if (freqold != freq) {
     time_now = millis();
     tunegen();
@@ -223,26 +224,22 @@ void loop() {
     time_now = millis();
     xo = x;
   }
-
   if ((time_now + period) > millis()) {
     displayfreq();
     layout();
   }
 }
-
 void tunegen() {
-  // si5351.set_freq((freq + (interfreq * 1000ULL)) * 100ULL, SI5351_CLK0);
+  Serial1.printf("F %u\n", (unsigned long)freq);
+  Serial.printf("F %u\n", (unsigned long)freq);
 }
-
 void displayfreq() {
   unsigned int m = freq / 1000000;
   unsigned int k = (freq % 1000000) / 1000;
   unsigned int h = (freq % 1000) / 1;
-
   display.clearDisplay();
   display.setTextSize(2);
   char buffer[15] = "";
-
   if (m < 1) {
     display.setCursor(41, 1);
     sprintf(buffer, "%003d.%003d", k, h);
@@ -256,7 +253,6 @@ void displayfreq() {
   }
   display.print(buffer);
 }
-
 void setstep() {
   switch (stp) {
     case 1:
@@ -285,14 +281,12 @@ void setstep() {
       break;
   }
 }
-
 void inc_preset() {
   count++;
   if (count > 21) count = 1;
   bandpresets();
   delay(50);
 }
-
 void bandpresets() {
   switch (count) {
     case 1: freq = 100000; break;
@@ -320,7 +314,6 @@ void bandpresets() {
   stp = 4;
   setstep();
 }
-
 void layout() {
   display.setTextColor(WHITE);
   display.drawLine(0, 20, 127, 20, WHITE);
@@ -361,7 +354,6 @@ void layout() {
   drawbargraph();
   display.display();
 }
-
 void bandlist() {
   display.setTextSize(2);
   display.setCursor(0, 25);
@@ -389,7 +381,6 @@ void bandlist() {
   if (count == 1) interfreq = 0;
   else if (!sts) interfreq = IF;
 }
-
 void drawbargraph() {
   byte y = map(n, 1, 42, 1, 14);
   display.setTextSize(1);
