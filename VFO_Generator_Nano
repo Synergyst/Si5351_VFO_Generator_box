@@ -1,0 +1,314 @@
+#include <si5351.h>          // Etherkit https://github.com/etherkit/Si5351Arduino
+#include <Rotary.h>          // Ben Buxton https://github.com/brianlow/Rotary
+#include <Wire.h>            // IDE Standard
+#include <SoftwareSerial.h>  // IDE Standard
+
+#define IF 10700        // Enter your IF frequency, ex: 455 = 455kHz, 10700 = 10.7MHz, 0 = to direct convert receiver or RF generator, + will add and - will subtract IF offset.
+#define BAND_INIT 20    // Enter your initial Band (1-21) at startup, ex: 1 = Freq Generator, 2 = 800kHz (MW), 7 = 7.2MHz (40m), 11 = 14.1MHz (20m).
+#define XT_CAL_F 33000  // Si5351 calibration factor, adjust to get exatcly 10MHz. Increasing this value will decreases the frequency and vice versa.
+#define S_GAIN 505      // Adjust the sensitivity of Signal Meter A/D input: 101 = 500mv; 202 = 1v; 303 = 1.5v; 404 = 2v; 505 = 2.5v; 1010 = 5v (max).
+
+#define tunestep 9  // The pin used by tune step push button.
+#define band A0     // The pin used by band selector push button.
+#define adc A1      // The pin used by Signal Meter A/D input.
+#define rx_tx 10    // The pin used by RX / TX selector switch, RX = switch open, TX = switch closed to GND. When in TX, the IF value is not considered.
+#define rotLeft 3   // The pin used by rotary-left input.
+#define rotRight 2  // The pin used by rotary-right input.
+
+#define TX_PIN 11  // SoftwareSerial TX pin
+#define RX_PIN 12  // SoftwareSerial RX pin
+#define BAUD 9600  // SoftwareSerial baud rate
+
+//------------------------------------------------------------------------------------------------------------
+Rotary r = Rotary(rotRight, rotLeft);
+Si5351 si5351(0x60);
+SoftwareSerial rp(TX_PIN, RX_PIN);
+
+unsigned long freq, freqold, fstep;
+long interfreq = IF, interfreqold = 0;
+long cal = XT_CAL_F;
+unsigned int smval;
+byte encoder = 1;
+byte stp, n = 1;
+byte count, x, xo;
+bool sts = 0;
+unsigned int period = 100;
+unsigned long time_now = 0;
+
+// --- TX/RX debounced state and spam control ---
+const unsigned long RXTX_DEBOUNCE_MS = 30;
+static bool lastRawTx = false;
+static bool debouncedTx = false;
+static bool lastAnnouncedTx = false;
+static unsigned long rxtxLastEdgeMs = 0;
+
+// Encoder state
+static uint8_t encPrev = 0;  // previous 2-bit state AB
+static int8_t encAccum = 0;  // accumulate transitions to 1 detent
+static const int8_t encTable[16] = {
+  0, -1, +1, 0,
+  +1, 0, 0, -1,
+  -1, 0, 0, +1,
+  0, +1, -1, 0
+};
+
+// --------- Line Reader (newline-terminated) ----------
+static const size_t CMD_BUF_SZ = 64;
+static char rpRxBuf[CMD_BUF_SZ];
+static size_t rpRxLen = 0;
+
+
+void rplog(const char* msg, Stream& io, bool addNewline = false, unsigned perCharDelayMs = 50) {
+  // Existing debug writer (kept, but we pass perCharDelayMs=0)
+  if (!msg) return;
+  for (const char* p = msg; *p; ++p) {
+    if (perCharDelayMs) delay(perCharDelayMs);
+    io.write((uint8_t)*p);
+    yield();
+  }
+  if (addNewline) {
+    if (perCharDelayMs) delay(perCharDelayMs);
+    io.write('\n');
+  }
+}
+void rplog(const String& msg, Stream& io, bool addNewline = false, unsigned perCharDelayMs = 50) {
+  for (size_t i = 0; i < msg.length(); ++i) {
+    if (perCharDelayMs) delay(perCharDelayMs);
+    io.write((uint8_t)msg[i]);
+    yield();
+  }
+  if (addNewline) {
+    if (perCharDelayMs) delay(perCharDelayMs);
+    io.write('\n');
+  }
+}
+
+// Non-blocking line reader for any Stream. Returns true when a line (ending in '\n') is assembled.
+// The line in outBuf is null-terminated and does not include CR/LF.
+bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
+  while (s.available()) {
+    delay(50);
+    char c = (char)s.read();
+    if (c == '\r') {
+      continue;  // ignore CR
+    } else if (c == '\n') {
+      // terminate line
+      if (inoutLen < outSz) outBuf[inoutLen] = '\0';
+      else outBuf[outSz - 1] = '\0';
+      inoutLen = 0;  // reset for next line
+      return true;
+    } else {
+      if (inoutLen < (outSz - 1)) {
+        outBuf[inoutLen++] = c;
+      } else {
+        // overflow, reset (drop line)
+        inoutLen = 0;
+      }
+    }
+  }
+  return false;
+}
+
+// --------- Minimal TX helpers (newline-terminated) ----------
+void sendToken(const char* tok) {
+  // Use rplog with no per-char delay and add newline
+  rplog(tok, rp, true, 0);
+}
+void sendKV(const char* key, long value) {
+  // "KEY <value>\n"
+  rplog(String(key) + " " + String(value), rp, true, 0);
+}
+
+// --------- Rotary handling ----------
+inline void pollEncoder() {
+  uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
+  uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
+  uint8_t curr = (a << 1) | b;
+  uint8_t idx = (encPrev << 2) | curr;
+  int8_t delta = encTable[idx];
+
+  if (delta != 0) {
+    encAccum += delta;
+    if (encAccum >= 4) {
+      sendToken("R");  // Right detent
+      encAccum = 0;
+    } else if (encAccum <= -4) {
+      sendToken("L");  // Left detent
+      encAccum = 0;
+    }
+  }
+  encPrev = curr;
+}
+
+void pollRxTx() {
+  bool raw = (digitalRead(rx_tx) == LOW);  // LOW = TX
+  unsigned long now = millis();
+
+  if (raw != lastRawTx) {  // edge detected
+    lastRawTx = raw;
+    rxtxLastEdgeMs = now;
+  }
+
+  // if stable past debounce, accept new state
+  if ((now - rxtxLastEdgeMs) >= RXTX_DEBOUNCE_MS && debouncedTx != lastRawTx) {
+    debouncedTx = lastRawTx;
+    sts = debouncedTx ? 1 : 0;             // optional local mirror
+    if (debouncedTx != lastAnnouncedTx) {  // send only when it actually changed
+      lastAnnouncedTx = debouncedTx;
+      rp.println(debouncedTx ? "TX" : "RX");
+    }
+  }
+}
+
+int freeRam() {
+  int size = 2048;
+  byte* buf;
+  while ((buf = (byte*)malloc(--size)) == NULL)
+    ;
+  free(buf);
+  return size;
+}
+
+// --------- Optional: handle inbound commands to Nano ----------
+void handleInboundFromRP(const char* line) {
+  // Examples:
+  // "PING" -> respond "PONG"
+  // "F 12345678" -> could be used to set local SI5351 (not implemented here)
+  // "SM 10" -> could be used to adjust something (ignored here)
+
+  if (line[0] == '\0') return;
+
+  if (!strcmp(line, "PING")) {
+    sendToken("PONG");
+    return;
+  }
+
+  if (!strcmp(line, "OK")) {
+    // end of state-dump; nothing special to do
+    return;
+  }
+
+  // Parse KEY [VALUE]
+  char key[8] = { 0 };
+  long val = 0;
+  int matched = sscanf(line, "%7s %ld", key, &val);
+  if (matched >= 1) {
+    if (!strcmp(key, "F") && matched == 2) {
+      // Authoritative frequency in Hz
+      freq = (unsigned long)val;
+    } else if (!strcmp(key, "IF") && matched == 2) {
+      // Authoritative IF in kHz
+      interfreq = val;
+    } else if (!strcmp(key, "SM") && matched == 2) {
+      // Authoritative signal meter bucket 1..14
+      if (val < 1) val = 1;
+      if (val > 14) val = 14;
+      x = (byte)val;
+    } else if (!strcmp(key, "BAND") && matched == 2) {
+      // Authoritative band index 1..21
+      if (val < 1) val = 1;
+      if (val > 21) val = 21;
+      count = (byte)val;
+    } else if (!strcmp(key, "STP") && matched == 2) {
+      // Authoritative step index 1..6 (index, not Hz)
+      if (val < 1) val = 1;
+      if (val > 6) val = 6;
+      stp = (byte)val;
+    } else if (!strcmp(key, "STS") && matched == 2) {
+      // Authoritative RX/TX from RP (0=RX, 1=TX)
+      sts = (val != 0);
+      // Note: We keep physical switch debounce logic in pollRxTx() authoritative for sending updates.
+    } else if (!strcmp(key, "N") && matched == 2) {
+      // Authoritative tune pointer 1..42
+      if (val < 1) val = 1;
+      if (val > 42) val = 42;
+      n = (byte)val;
+    }
+  }
+}
+
+// --------- Signal meter sampling + send when changed ----------
+uint8_t lastSMBucket = 0;
+unsigned long lastSMSendMs = 0;
+const unsigned long SM_MIN_SEND_INTERVAL_MS = 100;  // don't spam
+
+void sampleAndSendSignalMeter() {
+  unsigned int raw = analogRead(adc);
+  // Map 0..S_GAIN to 1..14 (clamp at bounds)
+  uint8_t bucket = map(raw, 0, S_GAIN, 1, 14);
+  if (bucket > 14) bucket = 14;
+  if (bucket < 1) bucket = 1;
+
+  unsigned long now = millis();
+  if (bucket != lastSMBucket && (now - lastSMSendMs) >= SM_MIN_SEND_INTERVAL_MS) {
+    lastSMBucket = bucket;
+    lastSMSendMs = now;
+    sendKV("SM", bucket);  // e.g., "SM 12\n"
+  }
+}
+
+//------------------------------------------------------------------------------------------------------------
+void setup() {
+  Wire.setClock(100000);
+  Wire.begin();
+
+  pinMode(rotLeft, INPUT_PULLUP);
+  pinMode(rotRight, INPUT_PULLUP);
+  pinMode(tunestep, INPUT_PULLUP);
+  pinMode(band, INPUT_PULLUP);
+  pinMode(rx_tx, INPUT_PULLUP);
+
+  rp.begin(BAUD);
+
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+  si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+  si5351.output_enable(SI5351_CLK0, 1);
+  si5351.output_enable(SI5351_CLK1, 0);
+  si5351.output_enable(SI5351_CLK2, 0);
+
+  // Initialize encoder previous state
+  {
+    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
+    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
+    encPrev = (a << 1) | b;
+    encAccum = 0;
+  }
+
+  // Initialize TX/RX state and announce once
+  lastRawTx = (digitalRead(rx_tx) == LOW);  // LOW = TX (per your comment)
+  debouncedTx = lastRawTx;
+  lastAnnouncedTx = debouncedTx;
+  sts = debouncedTx ? 1 : 0;              // optional local mirror
+  rp.println(debouncedTx ? "TX" : "RX");  // newline-terminated
+
+  // Ask RP2040 to send its current state so we can resync
+  rp.println("Q");
+}
+
+void loop() {
+  // Non-blocking read and process complete lines from RP2040
+  if (readLine(rp, rpRxBuf, rpRxLen, CMD_BUF_SZ)) handleInboundFromRP(rpRxBuf);
+
+  // Encoder and buttons
+  pollEncoder();
+
+  pollRxTx();
+
+  if (digitalRead(tunestep) == LOW) {
+    time_now = (millis() + 300);
+    sendToken("T");
+    delay(300);
+  }
+  if (digitalRead(band) == LOW) {
+    time_now = (millis() + 300);
+    sendToken("B");
+    delay(300);
+  }
+
+  // Optional RX/TX handling was commented out in original; left unchanged
+  // if (digitalRead(rx_tx) == LOW) { ... }
+
+  // Periodically sample and send signal meter bucket when it changes
+  sampleAndSendSignalMeter();
+}
