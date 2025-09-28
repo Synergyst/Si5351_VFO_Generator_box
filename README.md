@@ -5,6 +5,14 @@ Overview
 - This project swaps control of the OLED and adds a WaveShare RP2040 Zero for USB‑C, keeping the rest of the radio/VFO hardware intact and allowing the modification to be fully reversible (only if you follow the recommended instructions).
 - Rationale: the Nano’s limited SRAM (~2 KB) makes the planned UI/feature set tight; moving the UI/I2C control to RP2040 Zero avoids RAM constraints and adds ability to add further modifications otherwise not possible due to SRAM-constraints.
 
+Important cautions
+- Remove 3.7V Li-Po cell from Nano PCB BEFORE modifications! I personally flipped the cell so it is adhered to the bottom of the Nano PCB so I can slide the PCB in/out easier in the future ever.
+- Logic levels: the RP2040 Zero and Nano is 3.3V only! Do not feed 5V signals into RP2040 Zero or Nano pins!
+- ESD and shorts: heatshrink any "hanging" or clipped conductors and double‑check clearances before powering on. Modifications will be tight and adjacent to dangerous voltage differentials for each board. Please thoroughly check the voltages and pins and insulate the WaveShare RP2040 Zero thoroughly before you try to plug the 3.7V Li-Po cell back into the Nano-PCB, or plug in any USB-C cable!
+
+Compatibility note
+- If your unit has a SSD1306 OLED and a Si5351 clock generator, it is almost certainly the same platform regardless of listing source or branding, and these instructions should apply with minor mechanical variations.
+
 What you'll do
 - Make a small case mod to mount the WaveShare RP2040 Zero and expose its USB‑C port (I cut a slot near the ICSP header of the Nano MCU board after soldering the required 6-pins. This will keep the RP2040 Zero sitting behind the rotary encoder and buttons. I soldered the pins so I needed to keep the BOOT and RESET buttons facing down to the bottom of the enclosure, this was a mistake since the RP2040 Zero has a programmable WS2812 RGB LED that would've been nice for diagnosing errors/states in the future).
 - Isolate the OLED's I2C (SDA/SCL) from the stock front‑panel/Nano and rewire those lines to the RP2040 Zero (this will require unlatching the SDA and SCL wires from the cable going to the front-panel! Please heatshrink the hanging SDA and SCL wires that are from the Nano-side so they do not short!).
@@ -39,14 +47,6 @@ Wiring and hardware notes
   - RP2040 Zero GP0 → Nano D11 (ICSP pin 4 = D11 (MOSI))
   - RP2040 Zero GP1 → Nano D12 (ICSP pin 1 = D12 (MISO))
   - You can solder to ICSP pins 4 and 1 if that's more convenient. Keep leads short and insulated. I personally just made and used some short Dupont-terminated jumpers.
-
-Important cautions
-- Remove 3.7V Li-Po cell from Nano PCB BEFORE modifications! I personally flipped the cell so it is adhered to the bottom of the Nano PCB so I can slide the PCB in/out easier in the future ever.
-- Logic levels: the RP2040 Zero and Nano is 3.3V only! Do not feed 5V signals into RP2040 Zero or Nano pins!
-- ESD and shorts: heatshrink any "hanging" or clipped conductors and double‑check clearances before powering on. Modifications will be tight and adjacent to dangerous voltage differentials for each board. Please thoroughly check the voltages and pins and insulate the WaveShare RP2040 Zero thoroughly before you try to plug the 3.7V Li-Po cell back into the Nano-PCB, or plug in any USB-C cable!
-
-Compatibility note
-- If your unit has a SSD1306 OLED and a Si5351 clock generator, it is almost certainly the same platform regardless of listing source or branding, and these instructions should apply with minor mechanical variations.
 
 Product reference (this is what I used, please find the best price yourself via your preferred supplier):
 - Amazon listing: https://www.amazon.com/dp/B0CB1RQKTQ
