@@ -1,22 +1,18 @@
 #include <si5351.h>          // Etherkit https://github.com/etherkit/Si5351Arduino
-#include <Rotary.h>          // Ben Buxton https://github.com/brianlow/Rotary
 #include <Wire.h>            // IDE Standard
 #include <SoftwareSerial.h>  // IDE Standard
-#define IF 10590             // Enter your IF frequency, ex: 455 = 455kHz, 10700 = 10.7MHz, 0 = to direct convert receiver or RF generator, + will add and - will subtract IF offset.
-#define BAND_INIT 20         // Enter your initial Band (1-21) at startup, ex: 1 = Freq Generator, 2 = 800kHz (MW), 7 = 7.2MHz (40m), 11 = 14.1MHz (20m).
-#define XT_CAL_F 0           // Si5351 calibration factor, adjust to get exatcly 10MHz. Increasing this value will decreases the frequency and vice versa.
+#define IF 10700             // Enter your IF frequency, ex: 455 = 455kHz, 10700 = 10.7MHz, 0 = to direct convert receiver or RF generator, + will add and - will subtract IF offset.
+#define BAND_INIT 18         // Enter your initial Band (1-21) at startup, ex: 1 = Freq Generator, 2 = 800kHz (MW), 7 = 7.2MHz (40m), 11 = 14.1MHz (20m).
+#define XT_CAL_F 110000      // Si5351 calibration factor, adjust to get exatcly 10MHz. Increasing this value will decreases the frequency and vice versa.
 #define S_GAIN 505           // Adjust the sensitivity of Signal Meter A/D input: 101 = 500mv; 202 = 1v; 303 = 1.5v; 404 = 2v; 505 = 2.5v; 1010 = 5v (max).
 #define tunestep 9           // The pin used by tune step push button.
 #define band A0              // The pin used by band selector push button.
 #define adc A1               // The pin used by Signal Meter A/D input.
 #define rx_tx 10             // The pin used by RX / TX selector switch, RX = switch open, TX = switch closed to GND. When in TX, the IF value is not considered.
-#define rotLeft 3            // The pin used by rotary-left input.
-#define rotRight 2           // The pin used by rotary-right input.
 #define TX_PIN 11            // SoftwareSerial TX pin
 #define RX_PIN 12            // SoftwareSerial RX pin
 #define BAUD 9600            // SoftwareSerial baud rate
 //------------------------------------------------------------------------------------------------------------
-Rotary r = Rotary(rotRight, rotLeft);
 Si5351 si5351(0x60);
 SoftwareSerial rp(TX_PIN, RX_PIN);
 unsigned long freq, freqold, fstep;
@@ -35,15 +31,6 @@ static bool lastRawTx = false;
 static bool debouncedTx = false;
 static bool lastAnnouncedTx = false;
 static unsigned long rxtxLastEdgeMs = 0;
-// Encoder state
-static uint8_t encPrev = 0;  // previous 2-bit state AB
-static int8_t encAccum = 0;  // accumulate transitions to 1 detent
-static const int8_t encTable[16] = {
-  0, -1, +1, 0,
-  +1, 0, 0, -1,
-  -1, 0, 0, +1,
-  0, +1, -1, 0
-};
 // --------- Line Reader (newline-terminated) ----------
 static const size_t CMD_BUF_SZ = 64;
 static char rpRxBuf[CMD_BUF_SZ];
@@ -105,25 +92,6 @@ void sendToken(const char* tok) {
 void sendKV(const char* key, long value) {
   // "KEY <value>\n"
   rplog(String(key) + " " + String(value), rp, true, 0);
-}
-inline void pollEncoder() {
-  // --------- Rotary handling ----------
-  uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
-  uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
-  uint8_t curr = (a << 1) | b;
-  uint8_t idx = (encPrev << 2) | curr;
-  int8_t delta = encTable[idx];
-  if (delta != 0) {
-    encAccum += delta;
-    if (encAccum >= 4) {
-      sendToken("R");  // Right detent
-      encAccum = 0;
-    } else if (encAccum <= -4) {
-      sendToken("L");  // Left detent
-      encAccum = 0;
-    }
-  }
-  encPrev = curr;
 }
 void pollRxTx() {
   bool raw = (digitalRead(rx_tx) == LOW);  // LOW = TX
@@ -229,8 +197,6 @@ void sampleAndSendSignalMeter() {
 void setup() {
   Wire.setClock(100000);
   Wire.begin();
-  pinMode(rotLeft, INPUT_PULLUP);
-  pinMode(rotRight, INPUT_PULLUP);
   pinMode(tunestep, INPUT_PULLUP);
   pinMode(band, INPUT_PULLUP);
   pinMode(rx_tx, INPUT_PULLUP);
@@ -242,13 +208,6 @@ void setup() {
   si5351.output_enable(SI5351_CLK0, 1);
   si5351.output_enable(SI5351_CLK1, 0);
   si5351.output_enable(SI5351_CLK2, 0);
-  // Initialize encoder previous state
-  {
-    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
-    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
-    encPrev = (a << 1) | b;
-    encAccum = 0;
-  }
   // Initialize TX/RX state and announce once
   lastRawTx = (digitalRead(rx_tx) == LOW);  // LOW = TX (per your comment)
   debouncedTx = lastRawTx;
@@ -262,17 +221,16 @@ void loop() {
   // Non-blocking read and process complete lines from RP2040
   if (readLine(rp, rpRxBuf, rpRxLen, CMD_BUF_SZ)) handleInboundFromRP(rpRxBuf);
   // Encoder and buttons
-  pollEncoder();
   pollRxTx();
   if (digitalRead(tunestep) == LOW) {
-    time_now = (millis() + 300);
+    time_now = (millis() + 750);
     sendToken("T");
-    delay(300);
+    delay(750);
   }
   if (digitalRead(band) == LOW) {
-    time_now = (millis() + 300);
+    time_now = (millis() + 750);
     sendToken("B");
-    delay(300);
+    delay(750);
   }
   if (freqold != freq) {
     time_now = millis();
@@ -294,7 +252,8 @@ void loop() {
 void tunegen() {
   si5351.set_freq((freq + (interfreq * 1000ULL)) * 100ULL, SI5351_CLK0);
   //rplog("OK\n", rp);
-  rplog("OK-F ", rp);
+  /*rplog("OK-F ", rp);
   rplog((String)(unsigned long)freq, rp);
-  rplog("\n", rp);
+  rplog("\n", rp);*/
+  rplog("K\n", rp);
 }
