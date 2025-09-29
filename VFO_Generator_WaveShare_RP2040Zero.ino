@@ -1,6 +1,7 @@
-#include <Adafruit_SSD1306.h>  // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
-#include <Adafruit_NeoPixel.h>
-#include <Wire.h>
+#include <Adafruit_SSD1306.h>   // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
+#include <Adafruit_NeoPixel.h>  // WS2812 LED
+#include <Rotary.h>             // Ben Buxton https://github.com/brianlow/Rotary
+#include <Wire.h>               // I2C
 #define LED_PIN 16
 #define LED_COUNT 1
 #define IS_RGBW true
@@ -10,11 +11,13 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #endif
 //------------------------------------------------------------------------------------------------------------
-#define IF 10590  // IF in kHz
-#define BAND_INIT 20
-#define XT_CAL_F 0
+#define IF 10700  // IF in kHz
+#define BAND_INIT 18
+#define XT_CAL_F 110000
 #define S_GAIN 505
 #define BAUD 9600
+#define rotLeft 7   // The pin used by rotary-left input.
+#define rotRight 6  // The pin used by rotary-right input.
 unsigned long freq, freqold, fstep;
 long interfreq = IF, interfreqold = 0;
 long cal = XT_CAL_F;
@@ -26,10 +29,43 @@ bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
+Rotary r = Rotary(rotRight, rotLeft);
+// Encoder state
+static uint8_t encPrev = 0;  // previous 2-bit state AB
+static int8_t encAccum = 0;  // accumulate transitions to 1 detent
+static const int8_t encTable[16] = {
+  0, -1, +1, 0,
+  +1, 0, 0, -1,
+  -1, 0, 0, +1,
+  0, +1, -1, 0
+};
 // --------- Line Reader (newline-terminated) ----------
 static const size_t CMD_BUF_SZ = 64;
 static char s1Buf[CMD_BUF_SZ];
 static size_t s1Len = 0;
+inline void pollEncoder() {
+  // --------- Rotary handling ----------
+  uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
+  uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
+  uint8_t curr = (a << 1) | b;
+  uint8_t idx = (encPrev << 2) | curr;
+  int8_t delta = encTable[idx];
+  if (delta != 0) {
+    encAccum += delta;
+    if (encAccum >= 4) {
+      //sendToken("R");  // Right detent
+      //Serial.println("R");
+      set_frequency(1);
+      encAccum = 0;
+    } else if (encAccum <= -4) {
+      //sendToken("L");  // Left detent
+      //Serial.println("L");
+      set_frequency(-1);
+      encAccum = 0;
+    }
+  }
+  encPrev = curr;
+}
 bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   while (s.available()) {
     char c = (char)s.read();
@@ -93,6 +129,11 @@ void handleCommand(const char* line) {
     delay(300);
     return;
   }
+  if (!strcmp(line, "K")) {
+    Serial.printf("RP2040Zero: Nano MCU retuned to: %u\n", freq);
+    time_now = millis();
+    return;
+  }
 
   if (!strcmp(line, "TX")) {
     sts = 1;
@@ -106,6 +147,11 @@ void handleCommand(const char* line) {
   }
   if (!strcmp(line, "OK")) {
     Serial.println("RP2040Zero: got OK from Nano MCU");
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "PONG")) {
+    Serial.println("RP2040Zero: got PONG from Nano MCU");
     time_now = millis();
     return;
   }
@@ -185,8 +231,16 @@ void set_frequency(short dir) {
 void setup() {
   Serial.begin(BAUD);   // USB CDC for debug
   Serial1.begin(BAUD);  // HW UART to Nano
-  //delay(10000);
   Serial.println("RP2040Zero: Starting now..");
+  pinMode(rotLeft, INPUT_PULLUP);
+  pinMode(rotRight, INPUT_PULLUP);
+  // Initialize encoder previous state
+  {
+    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
+    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
+    encPrev = (a << 1) | b;
+    encAccum = 0;
+  }
   strip.begin();
   strip.show();
   strip.setBrightness(255);
@@ -269,6 +323,7 @@ void loop() {
   if (readLine(Serial, s1Buf, s1Len, CMD_BUF_SZ)) {
     handleCommand(s1Buf);
   }
+  pollEncoder();
   if (freqold != freq) {
     time_now = millis();
     tunegen();
@@ -290,7 +345,7 @@ void loop() {
 }
 void tunegen() {
   Serial1.printf("F %u\n", (unsigned long)freq);
-  Serial.printf("F %u\n", (unsigned long)freq);
+  //Serial.printf("F %u\n", (unsigned long)freq);
 }
 void displayfreq() {
   unsigned int m = freq / 1000000;
@@ -335,8 +390,16 @@ void setstep() {
       fstep = 10000;
       break;
     case 6:
-      stp = 1;
+      stp = 7;
+      fstep = 100000;
+      break;
+    case 7:
+      stp = 8;
       fstep = 1000000;
+      break;
+    case 8:
+      stp = 1;
+      fstep = 10000000;
       break;
   }
 }
@@ -365,7 +428,7 @@ void bandpresets() {
     case 15: freq = 27015000; break;
     case 16: freq = 28400000; break;
     case 17: freq = 50000000; break;
-    case 18: freq = 100000000; break;
+    case 18: freq = 107700000; break;
     case 19: freq = 130000000; break;
     case 20: freq = 144000000; break;
     case 21: freq = 220000000; break;
@@ -390,7 +453,9 @@ void layout() {
   if (stp == 4) display.print(" 1kHz");
   if (stp == 5) display.print(" 5kHz");
   if (stp == 6) display.print("10kHz");
-  if (stp == 1) display.print(" 1MHz");
+  if (stp == 7) display.print("100kHz");
+  if (stp == 8) display.print(" 1MHz");
+  if (stp == 1) display.print(" 10MHz");
   display.setTextSize(1);
   display.setCursor(92, 48);
   display.print("IF:");
