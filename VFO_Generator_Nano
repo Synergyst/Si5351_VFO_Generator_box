@@ -25,6 +25,10 @@ byte count, x, xo;
 bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
+const uint32_t beatIntervalMs = 3000;
+static uint32_t lastBeatMs = 0;
+const uint32_t queryIntervalMs = 10000;
+static uint32_t lastQueryMs = 0;
 // --- TX/RX debounced state and spam control ---
 const unsigned long RXTX_DEBOUNCE_MS = 30;
 static bool lastRawTx = false;
@@ -35,7 +39,7 @@ static unsigned long rxtxLastEdgeMs = 0;
 static const size_t CMD_BUF_SZ = 64;
 static char rpRxBuf[CMD_BUF_SZ];
 static size_t rpRxLen = 0;
-void rplog(const char* msg, Stream& io, bool addNewline = false, unsigned perCharDelayMs = 50) {
+void rplog(const char* msg, Stream& io = rp, bool addNewline = false, unsigned perCharDelayMs = 50) {
   // Existing debug writer (kept, but we pass perCharDelayMs=0)
   if (!msg) return;
   for (const char* p = msg; *p; ++p) {
@@ -48,7 +52,7 @@ void rplog(const char* msg, Stream& io, bool addNewline = false, unsigned perCha
     io.write('\n');
   }
 }
-void rplog(const String& msg, Stream& io, bool addNewline = false, unsigned perCharDelayMs = 50) {
+void rplog(const String& msg, Stream& io = rp, bool addNewline = false, unsigned perCharDelayMs = 50) {
   for (size_t i = 0; i < msg.length(); ++i) {
     if (perCharDelayMs) delay(perCharDelayMs);
     io.write((uint8_t)msg[i]);
@@ -59,11 +63,11 @@ void rplog(const String& msg, Stream& io, bool addNewline = false, unsigned perC
     io.write('\n');
   }
 }
-// Non-blocking line reader for any Stream. Returns true when a line (ending in '\n') is assembled.
-// The line in outBuf is null-terminated and does not include CR/LF.
 bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
+  // Non-blocking line reader for any Stream. Returns true when a line (ending in '\n') is assembled.
+  // The line in outBuf is null-terminated and does not include CR/LF.
   while (s.available()) {
-    delay(50);
+    //delay(50);
     char c = (char)s.read();
     if (c == '\r') {
       continue;  // ignore CR
@@ -93,7 +97,7 @@ void sendKV(const char* key, long value) {
   // "KEY <value>\n"
   rplog(String(key) + " " + String(value), rp, true, 0);
 }
-void pollRxTx() {
+/*void pollRxTx() {
   bool raw = (digitalRead(rx_tx) == LOW);  // LOW = TX
   unsigned long now = millis();
   if (raw != lastRawTx) {  // edge detected
@@ -107,6 +111,27 @@ void pollRxTx() {
     if (debouncedTx != lastAnnouncedTx) {  // send only when it actually changed
       lastAnnouncedTx = debouncedTx;
       rp.println(debouncedTx ? "TX" : "RX");
+    }
+  }
+}*/
+void pollRxTx() {
+  bool raw = (digitalRead(rx_tx) == LOW);  // LOW = TX
+  unsigned long now = millis();
+  if (raw != lastRawTx) {
+    lastRawTx = raw;
+    rxtxLastEdgeMs = now;
+  }
+  if ((now - rxtxLastEdgeMs) >= RXTX_DEBOUNCE_MS && debouncedTx != lastRawTx) {
+    debouncedTx = lastRawTx;
+    sts = debouncedTx ? 1 : 0;
+    if (debouncedTx != lastAnnouncedTx) {
+      lastAnnouncedTx = debouncedTx;
+      rp.println(debouncedTx ? "TX" : "RX");
+      // Retune immediately so IF=0 (TX) or IF=IF_kHz (RX) is applied
+      tunegen();
+      // keep freqold in sync so the loop() change detector doesn't fire redundantly
+      freqold = freq;
+      interfreqold = interfreq;
     }
   }
 }
@@ -125,6 +150,10 @@ void handleInboundFromRP(const char* line) {
   // "F 12345678" -> could be used to set local SI5351 (not implemented here)
   // "SM 10" -> could be used to adjust something (ignored here)
   if (line[0] == '\0') return;
+  if (!strcmp(line, "P")) {
+    sendToken("P");
+    return;
+  }
   if (!strcmp(line, "PING")) {
     sendToken("PONG");
     return;
@@ -201,7 +230,7 @@ void setup() {
   pinMode(band, INPUT_PULLUP);
   pinMode(rx_tx, INPUT_PULLUP);
   rp.begin(BAUD);
-  rplog("PONG\n", rp);
+  rplog("P\n", rp);
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
   si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
   si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
@@ -248,12 +277,28 @@ void loop() {
   }
   // Periodically sample and send signal meter bucket when it changes
   sampleAndSendSignalMeter();
+  uint32_t now = millis();
+  if ((now - lastBeatMs) >= beatIntervalMs) {
+    lastBeatMs += beatIntervalMs;  // drift-free scheduling
+    rplog("P\n", rp);
+  }
+  if ((now - lastQueryMs) >= queryIntervalMs) {
+    lastQueryMs += queryIntervalMs;
+    rplog("Q\n", rp);
+  }
 }
-void tunegen() {
+/*void tunegen() {
   si5351.set_freq((freq + (interfreq * 1000ULL)) * 100ULL, SI5351_CLK0);
   //rplog("OK\n", rp);
-  /*rplog("OK-F ", rp);
-  rplog((String)(unsigned long)freq, rp);
-  rplog("\n", rp);*/
+  //rplog("OK-F ", rp);
+  //rplog((String)(unsigned long)freq, rp);
+  //rplog("\n", rp);
+  rplog("K\n", rp);
+}*/
+void tunegen() {
+  // Use IF only in RX. In TX, drive the carrier directly at freq.
+  uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;  // interfreq is kHz -> Hz
+  uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
+  si5351.set_freq(outCentiHz, SI5351_CLK0);
   rplog("K\n", rp);
 }
