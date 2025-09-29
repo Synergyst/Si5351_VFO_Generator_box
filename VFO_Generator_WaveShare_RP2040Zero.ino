@@ -2,6 +2,7 @@
 #include <Adafruit_NeoPixel.h>  // WS2812 LED
 #include <Rotary.h>             // Ben Buxton https://github.com/brianlow/Rotary
 #include <Wire.h>               // I2C
+#include <math.h>               // Standard math library
 #define LED_PIN 16
 #define LED_COUNT 1
 #define IS_RGBW true
@@ -86,6 +87,211 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   }
   return false;
 }
+static inline float easeOutCubic(float t) {
+  // Easing and scaled blit helper
+  return 1.0f - powf(1.0f - t, 3.0f);
+}
+static void drawBitmapScaled1(Adafruit_SSD1306& d,
+                              const uint8_t* buf, int bw, int bh,
+                              int cx, int cy, float sx, float sy) {
+  // Draw a 1bpp bitmap scaled around its center (sx/sy can be <1 for compression)
+  if (bw <= 0 || bh <= 0 || sx <= 0.0f || sy <= 0.0f) return;
+  const int dw = (int)fmaxf(1.0f, floorf(bw * sx + 0.5f));
+  const int dh = (int)fmaxf(1.0f, floorf(bh * sy + 0.5f));
+  const int x0 = cx - (dw / 2);
+  const int y0 = cy - (dh / 2);
+  const int rowBytes = (bw + 7) / 8;
+
+  for (int dy = 0; dy < dh; ++dy) {
+    const float srcYf = (float)dy / sy;
+    int syi = (int)floorf(srcYf);
+    if (syi < 0) syi = 0;
+    else if (syi >= bh) syi = bh - 1;
+    for (int dx = 0; dx < dw; ++dx) {
+      const float srcXf = (float)dx / sx;
+      int sxi = (int)floorf(srcXf);
+      if (sxi < 0) sxi = 0;
+      else if (sxi >= bw) sxi = bw - 1;
+      const uint8_t byte = buf[syi * rowBytes + (sxi >> 3)];
+      if (byte & (0x80 >> (sxi & 7))) {
+        const int x = x0 + dx;
+        const int y = y0 + dy;
+        if ((unsigned)x < (unsigned)d.width() && (unsigned)y < (unsigned)d.height()) {
+          d.drawPixel(x, y, WHITE);
+        }
+      }
+    }
+  }
+}
+void animateTextToCenterAndCompress(Adafruit_SSD1306& d,
+                                    const char* text,
+                                    int startX, int startY,
+                                    uint16_t moveMs,
+                                    uint16_t compressMs,
+                                    float minScaleY = 0.35f,
+                                    float maxStretchX = 1.15f) {
+  // Move text from (startX,startY) top-left to the center, then compress.
+  // minScaleY: final vertical scale (e.g., 0.35f); maxStretchX: optional horizontal stretch during squash.
+  // moveMs/compressMs: durations in ms.
+  // Uses the current GFX font & size to rasterize text into a 1bpp canvas, then blits without printing.
+  if (!text || !*text) return;
+
+  // Measure text bounds with current font
+  int16_t x1, y1;
+  uint16_t w, h;
+  d.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  if (w == 0 || h == 0) return;
+
+  // Render text into offscreen 1bpp canvas (no direct printing to display)
+  GFXcanvas1 canvas(w, h);
+  canvas.fillScreen(0);
+  canvas.setTextColor(1);
+  canvas.setTextSize(1);
+  // Align so that text's bounding box sits at (0,0)
+  canvas.setCursor(-x1, -y1);
+  canvas.print(text);
+  const uint8_t* buf = canvas.getBuffer();
+
+  const int W = d.width();
+  const int H = d.height();
+  const int targetX = (W - (int)w) / 2;  // top-left at center
+  const int targetY = (H - (int)h) / 2;
+
+  // 1) Move: translate from start to center with easing
+  {
+    const uint8_t dt = 16;
+    for (uint16_t t = 0; t <= moveMs; t += dt) {
+      float u = easeOutCubic(fminf(1.0f, (float)t / (float)moveMs));
+      float xf = startX + (targetX - startX) * u;
+      float yf = startY + (targetY - startY) * u;
+
+      d.clearDisplay();
+      d.drawBitmap((int)roundf(xf), (int)roundf(yf), buf, w, h, WHITE);
+      d.display();
+      delay(dt);
+      yield();
+    }
+  }
+
+  // 2) Compress at center: vertical squash with slight horizontal stretch
+  {
+    const int cx = targetX + (int)w / 2;
+    const int cy = targetY + (int)h / 2;
+    const uint8_t dt = 16;
+    for (uint16_t t = 0; t <= compressMs; t += dt) {
+      float u = easeOutCubic(fminf(1.0f, (float)t / (float)compressMs));
+      float sy = 1.0f + (minScaleY - 1.0f) * u;    // 1 -> minScaleY
+      float sx = 1.0f + (maxStretchX - 1.0f) * u;  // 1 -> maxStretchX
+
+      d.clearDisplay();
+      drawBitmapScaled1(d, buf, w, h, cx, cy, sx, sy);
+      d.display();
+      delay(dt);
+      yield();
+    }
+  }
+}
+inline void bootExplosion(Adafruit_SSD1306& d) {
+  // Convenience overload: keeps existing calls working (defaults to ~350 ms vibrate)
+  bootExplosion(d, 350);
+}
+void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs) {
+  const int W = d.width();
+  const int H = d.height();
+  const float cx = W / 2.0f;
+  const float cy = H / 2.0f;
+
+  // 1) Grow a filled circle in the center
+  d.clearDisplay();
+  const int finalR = 10;
+  for (int r = 2; r <= finalR; r += 2) {
+    d.clearDisplay();
+    d.fillCircle((int)cx, (int)cy, r, WHITE);
+    d.display();
+    delay(35);
+  }
+
+  // 1.5) Vibrate in-place for vibrateMs
+  // Small sub-pixel jitter with a bit of randomness to feel organic.
+  {
+    const uint8_t frameDt = 16;  // ~60 FPS
+    const float ampX = 1.2f;     // max ~±1.2 px
+    const float ampY = 1.0f;     // max ~±1.0 px
+    for (uint16_t t = 0; t < vibrateMs; t += frameDt) {
+      float phase = (float)t * 0.06f;
+      float dx = sinf(phase * 3.1f) * ampX + ((float)random(-10, 11)) * 0.03f;  // ±0.3 px noise
+      float dy = cosf(phase * 2.7f) * ampY + ((float)random(-10, 11)) * 0.03f;
+
+      d.clearDisplay();
+      d.fillCircle((int)roundf(cx + dx), (int)roundf(cy + dy),
+                   finalR + ((t >> 4) & 1), WHITE);  // tiny radius wobble
+      d.display();
+      delay(frameDt);
+      yield();
+    }
+  }
+
+  // 2) Explode into particles (your tuned values preserved)
+  const int N = 1600;  // number of particles
+  struct Particle {
+    float x, y, vx, vy;
+    uint16_t life;
+  };
+  Particle p[N];
+
+  // Seed PRNG
+  randomSeed((uint32_t)micros());
+
+  const float startR = 8.0f;  // radius of initial ring where particles spawn
+  for (int i = 0; i < N; ++i) {
+    float ang = (float)random(0, 6283) * 0.001f;           // ~0..2π
+    float r = startR + (float)random(-200, 201) * 0.005f;  // ±1 px variation
+    float speed = 0.6f + (float)random(0, 140) * 0.01f;    // 0.6..1.99 px/frame
+    float ca = cosf(ang);
+    float sa = sinf(ang);
+    p[i].x = cx + r * ca;
+    p[i].y = cy + r * sa;
+    p[i].vx = ca * speed;
+    p[i].vy = sa * speed;
+    p[i].life = 110 + (uint16_t)random(0, 30);  // frames alive
+  }
+
+  const float g = 0.039087f;      // gravity (px/frame^2)
+  const float drag = 0.9999996f;  // mild air drag
+  const int frames = 116;         // total frames to render
+
+  for (int frame = 0; frame < frames; ++frame) {
+    d.clearDisplay();
+
+    for (int i = 0; i < N; ++i) {
+      if (p[i].life == 0) continue;
+
+      // Draw
+      int xi = (int)(p[i].x + 0.5f);
+      int yi = (int)(p[i].y + 0.5f);
+      if ((uint32_t)xi < (uint32_t)W && (uint32_t)yi < (uint32_t)H) {
+        d.drawPixel(xi, yi, WHITE);
+      }
+
+      // Integrate motion
+      p[i].vx *= drag;
+      p[i].vy = p[i].vy * drag + g;
+      p[i].x += p[i].vx;
+      p[i].y += p[i].vy;
+
+      // Retire once well off-screen or life out
+      if (p[i].y > (H + 10) || p[i].x < -10 || p[i].x > (W + 10)) {
+        p[i].life = 0;
+      } else {
+        --p[i].life;
+      }
+    }
+
+    d.display();
+    delay(16);  // ~60 FPS
+    yield();
+  }
+}
 // --------- Command handlers ----------
 inline void s1SendKV(const char* key, long val) {
   Serial1.print(key);
@@ -134,14 +340,20 @@ void handleCommand(const char* line) {
     time_now = millis();
     return;
   }
+  if (!strcmp(line, "P")) {
+    time_now = millis();
+    return;
+  }
 
   if (!strcmp(line, "TX")) {
     sts = 1;
+    s1SendKV("IF", 0);    // make Nano’s IF = 0
     time_now = millis();  // cause UI refresh soon
     return;
   }
   if (!strcmp(line, "RX")) {
     sts = 0;
+    s1SendKV("IF", interfreq);  // restore IF
     time_now = millis();
     return;
   }
@@ -263,6 +475,14 @@ void setup() {
   display.print("is on!");
   display.display();
   display.setCursor(0, 0);
+
+  animateTextToCenterAndCompress(display, "VFO Generator", 25, 12, 500, 500, 0.0035f, 0.005f);
+  // Then trigger your explosion animation
+  bootExplosion(display, 400);  // or bootExplosion(display);
+  // Prepare screen for I2C device list
+  display.clearDisplay();
+  display.setCursor(0, 0);
+
   display.print("RP2040 I2C device(s):");
   display.setCursor(0, 12);
   for (uint8_t addr = 1; addr < 127; addr++) {
@@ -277,15 +497,12 @@ void setup() {
     }
   }
   delay(750);
-  display.setCursor(0, 0);
-  display.clearDisplay();
-  display.print("Waiting for Nano..");
-  display.display();
   bool nanoReady = false;
   while (!nanoReady) {
+    delay(500);
     if (readLine(Serial1, s1Buf, s1Len, CMD_BUF_SZ)) {
-      if (s1Buf[0] == '\0') return;
-      if (!strcmp(s1Buf, "PONG")) {
+      //if (s1Buf[0] == '\0') break;
+      if (!strcmp(s1Buf, "P")) {
         Serial.println("RP2040Zero: Nano is alive..");
         time_now = millis();
         nanoReady = true;
@@ -299,18 +516,25 @@ void setup() {
       // Unknown command -> optionally report over USB
       Serial.print("RP2040Zero: Unknown cmd: ");
       Serial.println(s1Buf);
+    } else {
+      display.setCursor(0, 0);
+      display.clearDisplay();
+      display.print("Waiting for Nano..");
+      display.setCursor(0, 12);
+      display.print(millis());
+      display.setCursor(0, 24);
+      display.print("ENSURE CORRECT BOOT:");
+      display.setCursor(0, 36);
+      display.print("PWR SW ON, AND THEN");
+      display.setCursor(0, 48);
+      display.print("PLUG USB CABLE(S) IN!");
+      display.display();
+      delay(500);
+      Serial1.print("P");
+      delay(500);
+      Serial1.print("\n");
+      delay(500);
     }
-    delay(50);
-    Serial1.print("P");
-    delay(50);
-    Serial1.print("I");
-    delay(50);
-    Serial1.print("N");
-    delay(50);
-    Serial1.print("G");
-    delay(50);
-    Serial1.print("\n");
-    delay(50);
   }
   Serial.println("RP2040Zero: Running loop now..\n");
 }
@@ -338,7 +562,10 @@ void loop() {
     time_now = millis();
     xo = x;
   }
-  if ((time_now + period) > millis()) {
+  static unsigned long lastDraw = 0;
+  const unsigned long drawPeriod = 100;  // ms
+  if (millis() - lastDraw >= drawPeriod) {
+    lastDraw = millis();
     displayfreq();
     layout();
   }
@@ -447,7 +674,7 @@ void layout() {
   display.setTextSize(1);
   display.setCursor(59, 23);
   display.print("STEP");
-  display.setCursor(54, 33);
+  display.setCursor(51, 33);
   if (stp == 2) display.print("  1Hz");
   if (stp == 3) display.print(" 10Hz");
   if (stp == 4) display.print(" 1kHz");
