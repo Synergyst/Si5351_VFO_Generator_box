@@ -14,7 +14,7 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 //------------------------------------------------------------------------------------------------------------
 #define IF 10700  // IF in kHz
 #define BAND_INIT 18
-#define XT_CAL_F 110000
+#define XT_CAL_F 0
 #define S_GAIN 505
 #define BAUD 9600
 #define rotLeft 7   // The pin used by rotary-left input.
@@ -41,7 +41,7 @@ static const int8_t encTable[16] = {
   0, +1, -1, 0
 };
 // --------- Line Reader (newline-terminated) ----------
-static const size_t CMD_BUF_SZ = 64;
+static const size_t CMD_BUF_SZ = 255;
 static char s1Buf[CMD_BUF_SZ];
 static size_t s1Len = 0;
 inline void pollEncoder() {
@@ -293,6 +293,27 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs) {
   }
 }
 // --------- Command handlers ----------
+void sendHelpRP() {
+  // --------- Console Help (RP2040) ----------
+  Serial.println("RP2040Zero Help:");
+  Serial.println("  HELP | ? | H         - show this help");
+  Serial.println("  _ <text>             - print <text> to console (non-command)");
+  Serial.println("  Q                    - send full state to Nano");
+  Serial.println("  R / L                - step frequency right/left (one detent)");
+  Serial.println("  T                    - cycle tuning step");
+  Serial.println("  B                    - cycle band preset");
+  Serial.println("  K                    - (from Nano) retuned notification");
+  Serial.println("  P                    - heartbeat from Nano (ignored here)");
+  Serial.println("  TX / RX              - force TX (IF=0) / RX (IF=IF_kHz)");
+  Serial.println("  READY?               - ask Nano to reply READY");
+  Serial.println("  PING                 - ask Nano to reply PONG");
+  Serial.println("  F <Hz>               - set frequency (Hz)");
+  Serial.println("  IF <kHz>             - set IF (kHz)");
+  Serial.println("  SM <1..14>           - set signal meter bucket");
+  Serial.println("Notes:");
+  Serial.println("  - Lines starting with '_' are printed to console only.");
+  Serial.println("  - SCAN-related commands are implemented on the Nano side.");
+}
 inline void s1SendKV(const char* key, long val) {
   Serial1.print(key);
   Serial1.print(' ');
@@ -308,7 +329,7 @@ void sendStateToNano() {
   s1SendKV("N", (long)n);                // 1..42 tune pointer
   Serial1.println("OK");                 // end of state dump
 }
-void handleCommand(const char* line) {
+void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;
   // Single-letter commands
   if (!strcmp(line, "Q")) {
@@ -336,7 +357,13 @@ void handleCommand(const char* line) {
     return;
   }
   if (!strcmp(line, "K")) {
-    Serial.printf("RP2040Zero: Nano MCU retuned to: %u\n", freq);
+    Serial.print("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) {
+      Serial.print("(from USB)");
+    } else {
+      Serial.print("(from Nano)");
+    }
+    Serial.printf(": Nano MCU retuned to: %u\n", freq);
     time_now = millis();
     return;
   }
@@ -358,17 +385,36 @@ void handleCommand(const char* line) {
     return;
   }
   if (!strcmp(line, "OK")) {
-    Serial.println("RP2040Zero: got OK from Nano MCU");
+    Serial.println("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) {
+      Serial.print("(from USB)");
+    } else {
+      Serial.print("(from Nano)");
+    }
+    Serial.print(": got OK from Nano MCU");
     time_now = millis();
     return;
   }
+
   if (!strcmp(line, "PONG")) {
-    Serial.println("RP2040Zero: got PONG from Nano MCU");
+    Serial.println("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) {
+      Serial.print("(from USB)");
+    } else {
+      Serial.print("(from Nano)");
+    }
+    Serial.print(": got PONG from Nano MCU");
     time_now = millis();
     return;
   }
   if (!strcmp(line, "READY")) {
-    Serial.println("RP2040Zero: got READY from Nano MCU");
+    Serial.println("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) {
+      Serial.print("(from USB)");
+    } else {
+      Serial.print("(from Nano)");
+    }
+    Serial.print(": got READY from Nano MCU");
     time_now = millis();
     return;
   }
@@ -380,6 +426,21 @@ void handleCommand(const char* line) {
   if (!strcmp(line, "PING")) {
     Serial1.print("PING\n");
     time_now = millis();
+    return;
+  }
+
+  // --- Console helper commands (RP2040-local) ---
+  if (!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H")) {
+    sendHelpRP();
+    Serial.println();
+    Serial1.print("?\n");
+    return;
+  }
+  if (line[0] == '_') {
+    // Print message to USB console as a non-command
+    const char* msg = line + 1;
+    if (*msg == ' ') ++msg;  // trim one leading space after underscore
+    Serial.println(msg);
     return;
   }
 
@@ -411,7 +472,13 @@ void handleCommand(const char* line) {
       time_now = millis();
       return;
     } else if (!strcmp(key, "OK-F") && matched == 2) {
-      Serial.printf("RP2040Zero: OK-F %u\n", (long)val);
+      Serial.print("RP2040Zero ");
+      if (&io == static_cast<Stream*>(&Serial)) {
+        Serial.print("(from USB)");
+      } else {
+        Serial.print("(from Nano)");
+      }
+      Serial.printf(": OK-F %u\n", (long)val);
       // Frequency in Hz
       /*if (val < 10000) val = 10000;
       if ((unsigned long)val > 225000000UL) val = 225000000UL;
@@ -422,8 +489,18 @@ void handleCommand(const char* line) {
     }
   }
   // Unknown command -> optionally report over USB
-  Serial.print("RP2040Zero: Unknown cmd: ");
+  Serial.print("RP2040Zero ");
+  if (&io == static_cast<Stream*>(&Serial)) {
+    Serial.print("(from USB)");
+  } else {
+    Serial.print("(from Nano)");
+  }
+  Serial.print(": Unknown cmd: ");
   Serial.println(line);
+  if (&io == static_cast<Stream*>(&Serial)) {
+    Serial.println("Passing to Nano since command came from USB console..");
+    Serial1.println(line);
+  }
 }
 void set_frequency(short dir) {
   if (encoder == 1) {  // Up/Down frequency
@@ -443,7 +520,7 @@ void set_frequency(short dir) {
 void setup() {
   Serial.begin(BAUD);   // USB CDC for debug
   Serial1.begin(BAUD);  // HW UART to Nano
-  Serial.println("RP2040Zero: Starting now..");
+  Serial.println("RP2040Zero (boot): Starting now..");
   pinMode(rotLeft, INPUT_PULLUP);
   pinMode(rotRight, INPUT_PULLUP);
   // Initialize encoder previous state
@@ -476,7 +553,7 @@ void setup() {
   display.display();
   display.setCursor(0, 0);
 
-  animateTextToCenterAndCompress(display, "VFO Generator", 25, 12, 500, 500, 0.0035f, 0.005f);
+  animateTextToCenterAndCompress(display, "VFO Generator", 25, 12, 1250, 500, 0.0035f, 0.005f);
   // Then trigger your explosion animation
   bootExplosion(display, 400);  // or bootExplosion(display);
   // Prepare screen for I2C device list
@@ -488,7 +565,7 @@ void setup() {
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
-      Serial.print("RP2040Zero: Detected I2C device on bus: 0x");
+      Serial.print("RP2040Zero (boot): Detected I2C device on bus: 0x");
       Serial.println(addr, HEX);
       display.print("0x");
       display.print(addr, HEX);
@@ -503,7 +580,7 @@ void setup() {
     if (readLine(Serial1, s1Buf, s1Len, CMD_BUF_SZ)) {
       //if (s1Buf[0] == '\0') break;
       if (!strcmp(s1Buf, "P")) {
-        Serial.println("RP2040Zero: Nano is alive..");
+        Serial.println("RP2040Zero (boot): Nano is alive..");
         time_now = millis();
         nanoReady = true;
         display.setCursor(0, 0);
@@ -514,7 +591,7 @@ void setup() {
         break;
       }
       // Unknown command -> optionally report over USB
-      Serial.print("RP2040Zero: Unknown cmd: ");
+      Serial.print("RP2040Zero (boot): Unknown cmd: ");
       Serial.println(s1Buf);
     } else {
       display.setCursor(0, 0);
@@ -536,16 +613,16 @@ void setup() {
       delay(500);
     }
   }
-  Serial.println("RP2040Zero: Running loop now..\n");
+  Serial.println("RP2040Zero (boot): Running loop now..\n");
 }
 void loop() {
   // Read complete commands from Nano on Serial1 (newline-terminated)
   if (readLine(Serial1, s1Buf, s1Len, CMD_BUF_SZ)) {
-    handleCommand(s1Buf);
+    handleCommand(s1Buf, Serial1);
   }
   // Read complete commands from RP2040Zero's USB on Serial (newline-terminated)
   if (readLine(Serial, s1Buf, s1Len, CMD_BUF_SZ)) {
-    handleCommand(s1Buf);
+    handleCommand(s1Buf, Serial);
   }
   pollEncoder();
   if (freqold != freq) {
