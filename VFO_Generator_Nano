@@ -3,7 +3,7 @@
 #include <SoftwareSerial.h>  // IDE Standard
 #define IF 10700             // Enter your IF frequency, ex: 455 = 455kHz, 10700 = 10.7MHz, 0 = to direct convert receiver or RF generator, + will add and - will subtract IF offset.
 #define BAND_INIT 18         // Enter your initial Band (1-21) at startup, ex: 1 = Freq Generator, 2 = 800kHz (MW), 7 = 7.2MHz (40m), 11 = 14.1MHz (20m).
-#define XT_CAL_F 110000      // Si5351 calibration factor, adjust to get exatcly 10MHz. Increasing this value will decreases the frequency and vice versa.
+#define XT_CAL_F 0           // Si5351 calibration factor, adjust to get exatcly 10MHz. Increasing this value will decreases the frequency and vice versa.
 #define S_GAIN 505           // Adjust the sensitivity of Signal Meter A/D input: 101 = 500mv; 202 = 1v; 303 = 1.5v; 404 = 2v; 505 = 2.5v; 1010 = 5v (max).
 #define tunestep 9           // The pin used by tune step push button.
 #define band A0              // The pin used by band selector push button.
@@ -36,7 +36,7 @@ static bool debouncedTx = false;
 static bool lastAnnouncedTx = false;
 static unsigned long rxtxLastEdgeMs = 0;
 // --------- Line Reader (newline-terminated) ----------
-static const size_t CMD_BUF_SZ = 64;
+static const size_t CMD_BUF_SZ = 255;
 static char rpRxBuf[CMD_BUF_SZ];
 static size_t rpRxLen = 0;
 void rplog(const char* msg, Stream& io = rp, bool addNewline = false, unsigned perCharDelayMs = 50) {
@@ -97,23 +97,6 @@ void sendKV(const char* key, long value) {
   // "KEY <value>\n"
   rplog(String(key) + " " + String(value), rp, true, 0);
 }
-/*void pollRxTx() {
-  bool raw = (digitalRead(rx_tx) == LOW);  // LOW = TX
-  unsigned long now = millis();
-  if (raw != lastRawTx) {  // edge detected
-    lastRawTx = raw;
-    rxtxLastEdgeMs = now;
-  }
-  // if stable past debounce, accept new state
-  if ((now - rxtxLastEdgeMs) >= RXTX_DEBOUNCE_MS && debouncedTx != lastRawTx) {
-    debouncedTx = lastRawTx;
-    sts = debouncedTx ? 1 : 0;             // optional local mirror
-    if (debouncedTx != lastAnnouncedTx) {  // send only when it actually changed
-      lastAnnouncedTx = debouncedTx;
-      rp.println(debouncedTx ? "TX" : "RX");
-    }
-  }
-}*/
 void pollRxTx() {
   bool raw = (digitalRead(rx_tx) == LOW);  // LOW = TX
   unsigned long now = millis();
@@ -143,6 +126,103 @@ int freeRam() {
   free(buf);
   return size;
 }
+// --------- Help Text ----------
+void sendHelp() {
+  // --------- Console Help (Nano) ----------
+  rplog(F("_ Nano Help:\n"), rp);
+  rplog(F("_   HELP | ? | H             - show this help\n"), rp);
+  rplog(F("_   P                        - ping (returns 'P')\n"), rp);
+  rplog(F("_   PING                     - send 'PONG'\n"), rp);
+  rplog(F("_   READY?                   - send 'READY'\n"), rp);
+  rplog(F("_   F <Hz>                   - set RF frequency (Hz)\n"), rp);
+  rplog(F("_   IF <kHz>                 - set IF (kHz)\n"), rp);
+  rplog(F("_   BAND <1..21>             - set band index\n"), rp);
+  rplog(F("_   STP <1..6>               - set step index\n"), rp);
+  rplog(F("_   STS <0|1>                - set RX/TX (0=RX, 1=TX)\n"), rp);
+  rplog(F("_   N <1..42>                - set tune pointer\n"), rp);
+
+  rplog(F("_ SCAN:\n"), rp);
+  rplog(F("_   SCAN START [H|C] [ms]    - start scan (source and delay optional)\n"), rp);
+  rplog(F("_   SCAN START [H|C] D <ms>  - alternate delay form\n"), rp);
+  rplog(F("_   SCAN STOP                - stop scanning\n"), rp);
+  rplog(F("_   SCAN?                    - status (SCAN,SRC,DELAY,LEN)\n"), rp);
+  rplog(F("_   SCAN USE H|C             - select hard/custom list\n"), rp);
+  rplog(F("_   SDELAY <ms>              - set scan step delay\n"), rp);
+  rplog(F("_   SLADD <Hz>               - add freq (Hz) to custom list\n"), rp);
+  rplog(F("_   SLCLR                    - clear custom list\n"), rp);
+
+  rplog(F("_ NOTES:\n"), rp);
+  rplog(F("_   - TX pauses scanning automatically; RX resumes.\n"), rp);
+  rplog(F("_   - Post-tuning, device emits 'K'. Signal meter: 'SM <1..14>'.\n"), rp);
+}
+// --------- Frequency Scanner ----------
+static bool scanOn = false;
+static uint8_t scanSrc = 0;          // 0 = hard-coded list, 1 = custom list
+static uint32_t scanDelayMs = 1000;  // per-step delay
+static uint32_t lastScanMs = 0;
+static size_t scanIdx = 0;
+static const uint32_t hardScanList[] = {
+  // Hard-coded scan list (edit to taste, Hz):
+  1000000UL,   // 1.000 MHz
+  1600000UL,   // 1.600 MHz
+  3500000UL,   // 3.500 MHz
+  7000000UL,   // 7.000 MHz
+  10000000UL,  // 10.000 MHz
+  14000000UL,  // 14.000 MHz
+  18068000UL,  // 18.068 MHz
+  21000000UL,  // 21.000 MHz
+  24890000UL,  // 24.890 MHz
+  28000000UL   // 28.000 MHz
+};
+static const size_t hardScanLen = sizeof(hardScanList) / sizeof(hardScanList[0]);
+static const size_t MAX_CUSTOM_SCAN = 16;
+static uint32_t customScanList[MAX_CUSTOM_SCAN];
+static size_t customScanLen = 0;
+static inline size_t currentListLen() {
+  return (scanSrc ? customScanLen : hardScanLen);
+}
+static inline const uint32_t* currentListPtr() {
+  return (scanSrc ? customScanList : hardScanList);
+}
+void scanUse(uint8_t src) {
+  scanSrc = (src ? 1 : 0);
+}
+void scanStart() {
+  if (currentListLen() == 0) {
+    rplog(F("_ ERR NO_LIST\n"), rp);
+    return;
+  }
+  scanOn = true;
+  scanIdx = 0;
+  // Step immediately on start:
+  lastScanMs = millis() - scanDelayMs;
+  rplog(F("_ SCAN 1\n"), rp);
+}
+void scanStop() {
+  scanOn = false;
+  rplog(F("_ SCAN 0\n"), rp);
+}
+void scanTick() {
+  if (!scanOn) return;
+  // Pause scanning in TX (sts==1), resume in RX automatically
+  if (sts) return;
+
+  size_t len = currentListLen();
+  if (len == 0) {
+    scanStop();
+    return;
+  }
+
+  uint32_t now = millis();
+  if ((now - lastScanMs) >= scanDelayMs) {
+    lastScanMs = now;
+    const uint32_t* list = currentListPtr();
+    freq = list[scanIdx];  // Hz
+    tunegen();             // retune now
+    freqold = freq;        // keep change detector quiet
+    scanIdx = (scanIdx + 1) % len;
+  }
+}
 // --------- Optional: handle inbound commands to Nano ----------
 void handleInboundFromRP(const char* line) {
   // Examples:
@@ -160,11 +240,116 @@ void handleInboundFromRP(const char* line) {
   }
   if (!strcmp(line, "READY?")) {
     delay(1000);
-    rplog("READY\n", rp);
+    rplog(F("READY\n"), rp);
     return;
   }
-  if (!strcmp(line, "OK")) {
-    // end of state-dump; nothing special to do
+  if (!strcmp(line, "OK")) return;
+  if (!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H")) {
+    sendHelp();
+    return;
+  }
+  // --- Scanner: status query
+  if (!strcmp(line, "SCAN?")) {
+    rplog(F("_ Scan values query:\n"), rp);
+    sendKV("_ SCAN", scanOn ? 1 : 0);
+    sendKV("_ SRC", scanSrc ? 1 : 0);  // 0=hard, 1=custom
+    sendKV("_ DELAY", (long)scanDelayMs);
+    sendKV("_ LEN", (long)currentListLen());
+    return;
+  }
+  // --- Scanner: clear custom list
+  if (!strcmp(line, "SLCLR")) {
+    customScanLen = 0;
+    rplog(F("OK\n"), rp);
+    return;
+  }
+  // --- Scanner: add a custom frequency (Hz)
+  if (!strncmp(line, "SLADD ", 6)) {
+    rplog(F("_ Scan list add:\n"), rp);
+    long v = atol(line + 6);
+    if (v <= 0) {
+      rplog(F("_ ERR BAD_FREQ\n"), rp);
+      return;
+    }
+    if (customScanLen >= MAX_CUSTOM_SCAN) {
+      rplog(F("_ ERR FULL\n"), rp);
+      return;
+    }
+    customScanList[customScanLen++] = (uint32_t)v;
+    sendKV("_ LEN", (long)customScanLen);
+    return;
+  }
+  // --- Scanner: set step delay (ms)
+  if (!strncmp(line, "SDELAY ", 7)) {
+    rplog(F("_ Scan delay:\n"), rp);
+    long v = atol(line + 7);
+    if (v < 10) v = 10;  // clamp minimal delay
+    scanDelayMs = (uint32_t)v;
+    sendKV("_ DELAY", (long)scanDelayMs);
+    return;
+  }
+  // --- Scanner: select source (hard/custom)
+  if (!strncmp(line, "SCAN USE ", 9)) {
+    rplog(F("_ Scan source (hard/custom):\n"), rp);
+    const char* p = line + 9;
+    if (!strcasecmp(p, "H") || !strcasecmp(p, "HARD")) {
+      scanUse(0);
+    } else if (!strcasecmp(p, "C") || !strcasecmp(p, "CUSTOM")) {
+      scanUse(1);
+    } else {
+      rplog(F("_ ERR SRC\n"), rp);
+      return;
+    }
+    sendKV("_ SRC", scanSrc ? 1 : 0);
+    return;
+  }
+  // --- Scanner: START/STOP with optional args
+  if (!strncmp(line, "SCAN ", 5)) {
+    rplog(F("_ Scan status query:\n"), rp);
+    // tokenize small command (up to 6 tokens)
+    char buf[CMD_BUF_SZ];
+    strncpy(buf, line, CMD_BUF_SZ - 1);
+    buf[CMD_BUF_SZ - 1] = '\0';
+    char* toks[6] = { 0 };
+    int nt = 0;
+    char* savep = nullptr;
+    char* tk = strtok_r(buf, " ", &savep);
+    while (tk && nt < 6) {
+      toks[nt++] = tk;
+      tk = strtok_r(nullptr, " ", &savep);
+    }
+    if (nt >= 2 && !strcasecmp(toks[1], "STOP")) {
+      scanStop();
+      return;
+    }
+    if (nt >= 2 && !strcasecmp(toks[1], "START")) {
+      // Optional args: H|C and/or <ms> or "D <ms>"
+      uint8_t src = scanSrc;
+      uint32_t delayMs = scanDelayMs;
+      for (int i = 2; i < nt; ++i) {
+        if (!toks[i]) continue;
+        if (!strcasecmp(toks[i], "H") || !strcasecmp(toks[i], "HARD")) {
+          src = 0;
+        } else if (!strcasecmp(toks[i], "C") || !strcasecmp(toks[i], "CUSTOM")) {
+          src = 1;
+        } else if (!strcasecmp(toks[i], "D")) {
+          if (i + 1 < nt) {
+            long v = atol(toks[i + 1]);
+            if (v >= 10) delayMs = (uint32_t)v;
+            i++;
+          }
+        } else if (toks[i][0] >= '0' && toks[i][0] <= '9') {
+          long v = atol(toks[i]);
+          if (v >= 10) delayMs = (uint32_t)v;
+        }
+      }
+      scanUse(src);
+      scanDelayMs = delayMs;
+      scanStart();
+      return;
+    }
+    // Unknown SCAN subcommand
+    rplog(F("_ ERR SCAN\n"), rp);
     return;
   }
   // Parse KEY [VALUE]
@@ -208,7 +393,7 @@ void handleInboundFromRP(const char* line) {
 // --------- Signal meter sampling + send when changed ----------
 uint8_t lastSMBucket = 0;
 unsigned long lastSMSendMs = 0;
-const unsigned long SM_MIN_SEND_INTERVAL_MS = 100;  // don't spam
+const unsigned long SM_MIN_SEND_INTERVAL_MS = 50;  // don't spam
 void sampleAndSendSignalMeter() {
   unsigned int raw = analogRead(adc);
   // Map 0..S_GAIN to 1..14 (clamp at bounds)
@@ -230,7 +415,7 @@ void setup() {
   pinMode(band, INPUT_PULLUP);
   pinMode(rx_tx, INPUT_PULLUP);
   rp.begin(BAUD);
-  rplog("P\n", rp);
+  rplog(F("P\n"), rp);
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
   si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
   si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
@@ -244,7 +429,7 @@ void setup() {
   sts = debouncedTx ? 1 : 0;              // optional local mirror
   rp.println(debouncedTx ? "TX" : "RX");  // newline-terminated
   // Ask RP2040 to send its current state so we can resync
-  rp.println("Q");
+  rplog(F("Q\n"), rp);
 }
 void loop() {
   // Non-blocking read and process complete lines from RP2040
@@ -277,28 +462,22 @@ void loop() {
   }
   // Periodically sample and send signal meter bucket when it changes
   sampleAndSendSignalMeter();
+  // Scanner progresses here (non-blocking); pauses automatically during TX
+  scanTick();
   uint32_t now = millis();
   if ((now - lastBeatMs) >= beatIntervalMs) {
     lastBeatMs += beatIntervalMs;  // drift-free scheduling
-    rplog("P\n", rp);
+    rplog(F("P\n"), rp);
   }
   if ((now - lastQueryMs) >= queryIntervalMs) {
     lastQueryMs += queryIntervalMs;
-    rplog("Q\n", rp);
+    rplog(F("Q\n"), rp);
   }
 }
-/*void tunegen() {
-  si5351.set_freq((freq + (interfreq * 1000ULL)) * 100ULL, SI5351_CLK0);
-  //rplog("OK\n", rp);
-  //rplog("OK-F ", rp);
-  //rplog((String)(unsigned long)freq, rp);
-  //rplog("\n", rp);
-  rplog("K\n", rp);
-}*/
 void tunegen() {
   // Use IF only in RX. In TX, drive the carrier directly at freq.
   uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;  // interfreq is kHz -> Hz
   uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
   si5351.set_freq(outCentiHz, SI5351_CLK0);
-  rplog("K\n", rp);
+  rplog(F("K\n"), rp);
 }
