@@ -74,7 +74,7 @@ static bool uiScanPending = false;
 
 // Same hard-coded list as on Nano (Hz)
 static const uint32_t uiHardScanList[] = {
-  // Time signals (WWV/WWVH/WWVB/CHU)
+  /*  // Time signals (WWV/WWVH/WWVB/CHU)
   60000UL,     // 0.060 MHz - WWVB (US time standard, LF)
   2500000UL,   // 2.5 MHz  - WWV/WWVH
   3330000UL,   // 3.33 MHz - CHU (Canada)
@@ -168,6 +168,13 @@ static const uint32_t uiHardScanList[] = {
   162500000UL,  // 162.500 MHz - WX Ch 5
   162525000UL,  // 162.525 MHz - WX Ch 6
   162550000UL   // 162.550 MHz - WX Ch 7
+  */
+
+
+  96300000UL,   // 96.3 MHz -
+  103300000UL,  // 103.3 MHz -
+  107700000UL,  // 107.7 MHz -
+  162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
 static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);
 static const size_t UI_MAX_CUSTOM_SCAN = 16;
@@ -562,7 +569,31 @@ void handleCommand(const char* line, Stream& io) {
     Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
-    Serial.print(": got OK from Nano MCU");
+    Serial.print(": got OK from Nano MCU\n");
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "SHK")) {
+    /*Serial.print("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    else Serial.print("(from Nano)");
+    Serial.print(": SYNCHASH OK\n");
+    display.setTextSize(1);
+    display.setCursor(0, 9);
+    display.print(" ");
+    display.display();*/
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "SHB")) {
+    Serial.print("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    else Serial.print("(from Nano)");
+    Serial.print(": SYNCHASH BAD\n");
+    display.setTextSize(1);
+    display.setCursor(0, 9);
+    display.print("!");
+    display.display();
     time_now = millis();
     return;
   }
@@ -784,7 +815,7 @@ void setup() {
   display.print("is on!");
   display.display();
   display.setCursor(0, 0);
-  animateTextToCenterAndCompress(display, "VFO Generator", 25, 12, 1250, 500, 0.35f, 1.15f);
+  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 750, 250, 0.3f, 0.025f);
   bootExplosion(display, 400);
   display.clearDisplay();
   display.setCursor(0, 0);
