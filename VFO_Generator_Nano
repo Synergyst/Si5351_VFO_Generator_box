@@ -29,7 +29,7 @@ const uint32_t beatIntervalMs = 3000;
 static uint32_t lastBeatMs = 0;
 const uint32_t queryIntervalMs = 10000;
 static uint32_t lastQueryMs = 0;
-void(* resetFunc) (void) = 0;
+void (*resetFunc)(void) = 0;
 // --- TX/RX debounced state and spam control ---
 const unsigned long RXTX_DEBOUNCE_MS = 30;
 static bool lastRawTx = false;
@@ -191,7 +191,7 @@ static uint32_t scanDelayMs = 1000;  // per-step delay
 static uint32_t lastScanMs = 0;
 static size_t scanIdx = 0;
 static const uint32_t hardScanList[] = {
-  // Time signals (WWV/WWVH/WWVB/CHU)
+  /*  // Time signals (WWV/WWVH/WWVB/CHU)
   60000UL,     // 0.060 MHz - WWVB (US time standard, LF)
   2500000UL,   // 2.5 MHz  - WWV/WWVH
   3330000UL,   // 3.33 MHz - CHU (Canada)
@@ -285,6 +285,13 @@ static const uint32_t hardScanList[] = {
   162500000UL,  // 162.500 MHz - WX Ch 5
   162525000UL,  // 162.525 MHz - WX Ch 6
   162550000UL   // 162.550 MHz - WX Ch 7
+  */
+
+
+  96300000UL,   // 96.3 MHz -
+  103300000UL,  // 103.3 MHz -
+  107700000UL,  // 107.7 MHz -
+  162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
 static const size_t hardScanLen = sizeof(hardScanList) / sizeof(hardScanList[0]);
 static const size_t MAX_CUSTOM_SCAN = 16;
@@ -355,14 +362,14 @@ void handleInboundFromRP(const char* line) {
     uint32_t myHash = computeSyncHashNano();
     if (myHash == lastRPSyncHash) {
       syncOK = true;
-      rplog(F("_ SYNCHASH OK\n"), rp);
+      rplog(F("SHK\n"), rp);
       if (scanGatePending) {
         scanGatePending = false;
         doScanStartNow();
       }
     } else {
       syncOK = false;
-      rplog(F("_ SYNCHASH BAD\n"), rp);
+      rplog(F("SHB\n"), rp);
       resetFunc();
     }
     return;
