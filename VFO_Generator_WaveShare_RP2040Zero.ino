@@ -1084,5 +1084,6 @@ void drawbargraph() {
     case 3: display.fillRect(25, 58, 2, 6, WHITE);
     case 2: display.fillRect(20, 58, 2, 6, WHITE);
     case 1: display.fillRect(15, 58, 2, 6, WHITE);
+    default: display.fillRect(15, 58, 2, 6, WHITE);
   }
 }
