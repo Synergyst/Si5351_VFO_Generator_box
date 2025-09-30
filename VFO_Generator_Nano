@@ -29,6 +29,7 @@ const uint32_t beatIntervalMs = 3000;
 static uint32_t lastBeatMs = 0;
 const uint32_t queryIntervalMs = 10000;
 static uint32_t lastQueryMs = 0;
+void(* resetFunc) (void) = 0;
 // --- TX/RX debounced state and spam control ---
 const unsigned long RXTX_DEBOUNCE_MS = 30;
 static bool lastRawTx = false;
@@ -362,6 +363,7 @@ void handleInboundFromRP(const char* line) {
     } else {
       syncOK = false;
       rplog(F("_ SYNCHASH BAD\n"), rp);
+      resetFunc();
     }
     return;
   }
