@@ -74,8 +74,100 @@ static bool uiScanPending = false;
 
 // Same hard-coded list as on Nano (Hz)
 static const uint32_t uiHardScanList[] = {
-  1000000UL, 1600000UL, 3500000UL, 7000000UL, 10000000UL,
-  14000000UL, 18068000UL, 21000000UL, 24890000UL, 28000000UL
+  // Time signals (WWV/WWVH/WWVB/CHU)
+  60000UL,     // 0.060 MHz - WWVB (US time standard, LF)
+  2500000UL,   // 2.5 MHz  - WWV/WWVH
+  3330000UL,   // 3.33 MHz - CHU (Canada)
+  5000000UL,   // 5 MHz    - WWV/WWVH
+  7850000UL,   // 7.85 MHz - CHU
+  10000000UL,  // 10 MHz   - WWV/WWVH
+  14670000UL,  // 14.67 MHz- CHU
+  15000000UL,  // 15 MHz   - WWV/WWVH
+  20000000UL,  // 20 MHz   - WWV
+
+  // Maritime MF distress/calling (SSB/DSC)
+  2182000UL,  // 2.182 MHz - International MF distress/calling (voice/SSB)
+  2187500UL,  // 2.1875 MHz- MF DSC (digital selective calling)
+
+  // Amateur HF digital/calling/nets
+  3573000UL,   // 3.573 MHz - 80m FT8
+  7074000UL,   // 7.074 MHz - 40m FT8
+  10136000UL,  // 10.136 MHz- 30m FT8
+  14074000UL,  // 14.074 MHz- 20m FT8
+  14100000UL,  // 14.100 MHz- IBP beacon segment
+  14300000UL,  // 14.300 MHz- Maritime Mobile Net / common 20m net freq
+  18100000UL,  // 18.100 MHz- 17m FT8
+  18110000UL,  // 18.110 MHz- IBP beacons (17m)
+  21074000UL,  // 21.074 MHz- 15m FT8
+  21150000UL,  // 21.150 MHz- IBP beacons (15m)
+  24915000UL,  // 24.915 MHz- 12m FT8
+  24930000UL,  // 24.930 MHz- IBP beacons (12m)
+  28074000UL,  // 28.074 MHz- 10m FT8
+  28200000UL,  // 28.200 MHz- 10m beacons (IBP + others)
+
+  // CB radio (AM; some SSB activity)
+  26965000UL,  // 26.965 MHz - CB Ch 1
+  27025000UL,  // 27.025 MHz - CB Ch 6 (AM "Super Bowl")
+  27065000UL,  // 27.065 MHz - CB Ch 9 (Emergency)
+  27185000UL,  // 27.185 MHz - CB Ch 19 (Highway)
+  27385000UL,  // 27.385 MHz - CB Ch 38 LSB (SSB calling/hangout)
+  27405000UL,  // 27.405 MHz - CB Ch 40
+
+  // 6 meters (50 MHz amateur)
+  50125000UL,  // 50.125 MHz - 6m SSB calling
+  50313000UL,  // 50.313 MHz - 6m FT8
+  52525000UL,  // 52.525 MHz - 6m FM simplex calling
+
+  // Aviation (AM)
+  121500000UL,  // 121.500 MHz - International airband emergency (VHF Guard)
+  122200000UL,  // 122.200 MHz - Common Flight Service / GA use
+  122800000UL,  // 122.800 MHz - Common CTAF/UNICOM (GA)
+  123450000UL,  // 123.450 MHz - Air-to-air (informal, often used)
+
+  // NOAA weather satellites (APT) - if your receiver supports them
+  137100000UL,  // 137.100 MHz - NOAA/Met APT downlink (NOAA-19)
+  137620000UL,  // 137.620 MHz - NOAA-15 APT
+  137912500UL,  // 137.9125 MHz- NOAA-18 APT
+
+  // 2 meters (144–148 MHz amateur)
+  144200000UL,  // 144.200 MHz - 2m SSB calling
+  144390000UL,  // 144.390 MHz - APRS (USA)
+  145800000UL,  // 145.800 MHz - ISS voice downlink (worldwide)
+  145825000UL,  // 145.825 MHz - ISS packet/APRS digipeater
+  146520000UL,  // 146.520 MHz - 2m FM national simplex calling (USA)
+
+  // VHF public safety interop (NFM; USA nationwide)
+  151137500UL,  // 151.1375 MHz - VTAC11
+  154265000UL,  // 154.2650 MHz - Fireground White
+  154280000UL,  // 154.2800 MHz - Fire Mutual Aid (VFIRE21)
+  154295000UL,  // 154.2950 MHz - Fireground Red
+  154452500UL,  // 154.4525 MHz - VTAC12
+  155160000UL,  // 155.1600 MHz - National SAR/EMS (often used)
+  155340000UL,  // 155.3400 MHz - EMS-to-hospital (HEAR, legacy)
+  155370000UL,  // 155.3700 MHz - Intercity/Mutual Aid (legacy)
+  155475000UL,  // 155.4750 MHz - National Law (NLEEF/NLEEC)
+  155752500UL,  // 155.7525 MHz - VCALL10
+
+  // Marine VHF (FM)
+  156450000UL,  // 156.450 MHz - Marine Ch 9 (Hailing)
+  156650000UL,  // 156.650 MHz - Marine Ch 13 (Bridge-to-bridge)
+  156800000UL,  // 156.800 MHz - Marine Ch 16 (Distress/Calling)
+  157100000UL,  // 157.100 MHz - Marine Ch 22A (USCG liaison)
+
+  // Railroad (N. America AAR channels; NFM)
+  160215000UL,  // 160.215 MHz - AAR Ch 01 (road)
+  160230000UL,  // 160.230 MHz - AAR Ch 08 (road)
+  160800000UL,  // 160.800 MHz - AAR Ch 24 (road)
+  161550000UL,  // 161.550 MHz - AAR Ch 96 (road)
+
+  // NOAA Weather Radio (FM)
+  162400000UL,  // 162.400 MHz - WX Ch 1
+  162425000UL,  // 162.425 MHz - WX Ch 2
+  162450000UL,  // 162.450 MHz - WX Ch 3
+  162475000UL,  // 162.475 MHz - WX Ch 4
+  162500000UL,  // 162.500 MHz - WX Ch 5
+  162525000UL,  // 162.525 MHz - WX Ch 6
+  162550000UL   // 162.550 MHz - WX Ch 7
 };
 static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);
 static const size_t UI_MAX_CUSTOM_SCAN = 16;
@@ -238,7 +330,10 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs) {
     }
   }
   const int N = 1600;
-  struct Particle { float x, y, vx, vy; uint16_t life; };
+  struct Particle {
+    float x, y, vx, vy;
+    uint16_t life;
+  };
   Particle p[N];
   randomSeed((uint32_t)micros());
   const float startR = 8.0f;
@@ -335,7 +430,9 @@ static inline size_t uiCurrentListLen() {
 static inline const uint32_t* uiCurrentListPtr() {
   return uiScanSrc ? uiCustomScanList : uiHardScanList;
 }
-static inline void uiScanUse(uint8_t src) { uiScanSrc = src ? 1 : 0; }
+static inline void uiScanUse(uint8_t src) {
+  uiScanSrc = src ? 1 : 0;
+}
 static void uiScanStart() {
   if (uiCurrentListLen() == 0) return;
   uiScanOn = true;
@@ -350,7 +447,10 @@ static void uiScanTick() {
   if (!uiScanOn) return;
   if (sts) return;
   size_t len = uiCurrentListLen();
-  if (len == 0) { uiScanOn = false; return; }
+  if (len == 0) {
+    uiScanOn = false;
+    return;
+  }
   uint32_t now = millis();
   if ((now - uiScanLastMs) >= uiScanDelayMs) {
     uiScanLastMs = now;
@@ -410,9 +510,18 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
-  if (!strcmp(line, "Q")) { sendStateToNano(); return; }
-  if (!strcmp(line, "R")) { set_frequency(1); return; }
-  if (!strcmp(line, "L")) { set_frequency(-1); return; }
+  if (!strcmp(line, "Q")) {
+    sendStateToNano();
+    return;
+  }
+  if (!strcmp(line, "R")) {
+    set_frequency(1);
+    return;
+  }
+  if (!strcmp(line, "L")) {
+    set_frequency(-1);
+    return;
+  }
   if (!strcmp(line, "T")) {
     time_now = (millis() + 300);
     setstep();
@@ -433,7 +542,10 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "P")) { time_now = millis(); return; }
+  if (!strcmp(line, "P")) {
+    time_now = millis();
+    return;
+  }
   if (!strcmp(line, "TX")) {
     sts = 1;
     s1SendKV("IF", 0);
@@ -496,10 +608,14 @@ void handleCommand(const char* line, Stream& io) {
   // Scanner UI mirror + forward
   if (!strcmp(line, "SCAN?")) {
     Serial.println("_ UI Scan values (RP2040 mirror):");
-    Serial.print("_ SCAN "); Serial.println(uiScanOn ? 1 : 0);
-    Serial.print("_ SRC "); Serial.println(uiScanSrc ? 1 : 0);
-    Serial.print("_ DELAY "); Serial.println((long)uiScanDelayMs);
-    Serial.print("_ LEN "); Serial.println((long)uiCurrentListLen());
+    Serial.print("_ SCAN ");
+    Serial.println(uiScanOn ? 1 : 0);
+    Serial.print("_ SRC ");
+    Serial.println(uiScanSrc ? 1 : 0);
+    Serial.print("_ DELAY ");
+    Serial.println((long)uiScanDelayMs);
+    Serial.print("_ LEN ");
+    Serial.println((long)uiCurrentListLen());
     Serial1.println("SCAN?");
     time_now = millis();
     return;
@@ -537,9 +653,12 @@ void handleCommand(const char* line, Stream& io) {
     int nt = 0;
     char* savep = nullptr;
     char* tk = strtok_r(buf, " ", &savep);
-    while (tk && nt < 6) { toks[nt++] = tk; tk = strtok_r(nullptr, " ", &savep); }
+    while (tk && nt < 6) {
+      toks[nt++] = tk;
+      tk = strtok_r(nullptr, " ", &savep);
+    }
     if (nt >= 2 && !strcasecmp(toks[1], "STOP")) {
-      uiScanStop(); // stop mirror immediately
+      uiScanStop();  // stop mirror immediately
       if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
       return;
     }
@@ -551,14 +670,19 @@ void handleCommand(const char* line, Stream& io) {
         if (!strcasecmp(toks[i], "H") || !strcasecmp(toks[i], "HARD")) src = 0;
         else if (!strcasecmp(toks[i], "C") || !strcasecmp(toks[i], "CUSTOM")) src = 1;
         else if (!strcasecmp(toks[i], "D")) {
-          if (i + 1 < nt) { long v = atol(toks[i + 1]); if (v >= 10) delayMs = (uint32_t)v; i++; }
+          if (i + 1 < nt) {
+            long v = atol(toks[i + 1]);
+            if (v >= 10) delayMs = (uint32_t)v;
+            i++;
+          }
         } else if (toks[i][0] >= '0' && toks[i][0] <= '9') {
-          long v = atol(toks[i]); if (v >= 10) delayMs = (uint32_t)v;
+          long v = atol(toks[i]);
+          if (v >= 10) delayMs = (uint32_t)v;
         }
       }
       uiScanUse(src);
       uiScanDelayMs = delayMs;
-      uiScanPending = true; // wait for Nano ack
+      uiScanPending = true;  // wait for Nano ack
       if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
       return;
     }
@@ -780,14 +904,38 @@ void displayfreq() {
 
 void setstep() {
   switch (stp) {
-    case 1: stp = 2; fstep = 1; break;
-    case 2: stp = 3; fstep = 10; break;
-    case 3: stp = 4; fstep = 1000; break;
-    case 4: stp = 5; fstep = 5000; break;
-    case 5: stp = 6; fstep = 10000; break;
-    case 6: stp = 7; fstep = 100000; break;
-    case 7: stp = 8; fstep = 1000000; break;
-    case 8: stp = 1; fstep = 10000000; break;
+    case 1:
+      stp = 2;
+      fstep = 1;
+      break;
+    case 2:
+      stp = 3;
+      fstep = 10;
+      break;
+    case 3:
+      stp = 4;
+      fstep = 1000;
+      break;
+    case 4:
+      stp = 5;
+      fstep = 5000;
+      break;
+    case 5:
+      stp = 6;
+      fstep = 10000;
+      break;
+    case 6:
+      stp = 7;
+      fstep = 100000;
+      break;
+    case 7:
+      stp = 8;
+      fstep = 1000000;
+      break;
+    case 8:
+      stp = 1;
+      fstep = 10000000;
+      break;
   }
 }
 
