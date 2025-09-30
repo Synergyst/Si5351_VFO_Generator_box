@@ -250,7 +250,6 @@ void scanTick() {
   }
 }
 void handleInboundFromRP(const char* line) {
-  // --------- handle inbound commands to Nano ----------
   if (line[0] == '\0') return;
   // SYNC protocol
   if (!strcmp(line, "SYNC?")) {
@@ -263,14 +262,14 @@ void handleInboundFromRP(const char* line) {
     uint32_t myHash = computeSyncHashNano();
     if (myHash == lastRPSyncHash) {
       syncOK = true;
-      //rplog(F("_ SYNC OK\n"), rp);
+      rplog(F("_ SYNCHASH OK\n"), rp);
       if (scanGatePending) {
         scanGatePending = false;
         doScanStartNow();
       }
     } else {
       syncOK = false;
-      rplog(F("_ SYNC BAD\n"), rp);
+      rplog(F("_ SYNCHASH BAD\n"), rp);
     }
     return;
   }
@@ -437,7 +436,7 @@ void handleInboundFromRP(const char* line) {
 // --------- Signal meter sampling + send when changed ----------
 uint8_t lastSMBucket = 0;
 unsigned long lastSMSendMs = 0;
-const unsigned long SM_MIN_SEND_INTERVAL_MS = 50;
+const unsigned long SM_MIN_SEND_INTERVAL_MS = 10;
 void sampleAndSendSignalMeter() {
   unsigned int raw = analogRead(adc);
   uint8_t bucket = map(raw, 0, S_GAIN, 1, 14);
@@ -447,7 +446,9 @@ void sampleAndSendSignalMeter() {
   if (bucket != lastSMBucket && (now - lastSMSendMs) >= SM_MIN_SEND_INTERVAL_MS) {
     lastSMBucket = bucket;
     lastSMSendMs = now;
-    sendKV("SM", bucket);
+    //sendKV("SM", bucket);
+    rplog(F("SM "), rp);
+    rplog((String)bucket, rp, true);
   }
 }
 //------------------------------------------------------------------------------------------------------------
