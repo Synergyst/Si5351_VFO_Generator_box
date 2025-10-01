@@ -655,7 +655,7 @@ void handleCommand(const char* line, Stream& io) {
   }
 
   // Scanner UI mirror + forward
-  if (!strcmp(line, "SCAN?") && !fromUSB) {
+  if (!strcmp(line, "SCAN?")) {
     Serial.println("_ UI Scan values (RP2040 mirror):");
     Serial.print("_ SCAN ");
     Serial.println(uiScanOn ? 1 : 0);
