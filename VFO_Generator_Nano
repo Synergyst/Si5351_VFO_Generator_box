@@ -1,3 +1,4 @@
+#include <avr/pgmspace.h>    // AVR standard
 #include <si5351.h>          // Etherkit https://github.com/etherkit/Si5351Arduino
 #include <Wire.h>            // IDE Standard
 #include <SoftwareSerial.h>  // IDE Standard
@@ -292,7 +293,7 @@ static const uint32_t hardScanList[] PROGMEM = {
   96300000UL,   // 96.3 MHz -
   102500000UL,  // 102.5 MHz -
   103300000UL,  // 103.3 MHz -
-  106500000UL,  // 106.5 MHz - 
+  106500000UL,  // 106.5 MHz -
   107700000UL,  // 107.7 MHz -
   //162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
@@ -305,6 +306,10 @@ static inline size_t currentListLen() {
 }
 static inline const uint32_t* currentListPtr() {
   return (scanSrc ? customScanList : hardScanList);
+}
+static uint32_t readScanItem(size_t idx) {
+  if (scanSrc) return customScanList[idx];
+  return pgm_read_dword(&hardScanList[idx]);
 }
 void scanUse(uint8_t src) {
   scanSrc = (src ? 1 : 0);
@@ -335,8 +340,7 @@ void scanStop() {
   rplog(F("_ SCAN 0\n"), rp);
 }
 void scanTick() {
-  if (!scanOn) return;
-  if (sts) return;
+  if (!scanOn || sts) return;
   size_t len = currentListLen();
   if (len == 0) {
     scanStop();
@@ -345,8 +349,10 @@ void scanTick() {
   uint32_t now = millis();
   if ((now - lastScanMs) >= scanDelayMs) {
     lastScanMs = now;
-    const uint32_t* list = currentListPtr();
-    freq = list[scanIdx];
+    /*const uint32_t* list = currentListPtr();
+    freq = list[scanIdx];*/
+    uint32_t f = readScanItem(scanIdx);
+    freq = f;
     tunegen();
     freqold = freq;
     scanIdx = (scanIdx + 1) % len;
