@@ -324,7 +324,7 @@ void doScanStartNow() {
   scanOn = true;
   scanIdx = 0;
   lastScanMs = millis() - scanDelayMs;
-  rplog(F("_ SCAN 1\n"), rp);
+  rplog(F("_ >SCAN 1\n"), rp);
 }
 // Gated start (ensures sync before starting)
 void scanStart() {
@@ -337,7 +337,7 @@ void scanStart() {
 
 void scanStop() {
   scanOn = false;
-  rplog(F("_ SCAN 0\n"), rp);
+  rplog(F("_ >SCAN 0\n"), rp);
 }
 void scanTick() {
   if (!scanOn || sts) return;
@@ -379,6 +379,8 @@ void handleInboundFromRP(const char* line) {
     } else {
       syncOK = false;
       rplog(F("SHB\n"), rp);
+      delay(50);
+      yield();
       resetFunc();
     }
     return;
@@ -389,6 +391,12 @@ void handleInboundFromRP(const char* line) {
   }
   if (!strcmp(line, "P")) {
     sendToken("P");
+    return;
+  }
+  if (!strcmp(line, "F?")) {
+    rplog(F("_ Nano: tuned to: "), rp);
+    rplog((String)freq, rp, true);
+    time_now = millis();
     return;
   }
   if (!strcmp(line, "PING")) {
@@ -407,11 +415,11 @@ void handleInboundFromRP(const char* line) {
   }
 
   if (!strcmp(line, "SCAN?")) {
-    rplog(F("_ Scan values query:\n"), rp);
-    sendKV("_ SCAN", scanOn ? 1 : 0);
-    sendKV("_ SRC", scanSrc ? 1 : 0);
-    sendKV("_ DELAY", (long)scanDelayMs);
-    sendKV("_ LEN", (long)currentListLen());
+    rplog(F("_ >Scan values query:\n"), rp);
+    sendKV("_ >SCAN", scanOn ? 1 : 0);
+    sendKV("_ >SRC", scanSrc ? 1 : 0);
+    sendKV("_ >DELAY", (long)scanDelayMs);
+    sendKV("_ >LEN", (long)currentListLen());
     return;
   }
   if (!strcmp(line, "SLCLR")) {
@@ -420,7 +428,7 @@ void handleInboundFromRP(const char* line) {
     return;
   }
   if (!strncmp(line, "SLADD ", 6)) {
-    rplog(F("_ Scan list add:\n"), rp);
+    rplog(F("_ >Scan list add:\n"), rp);
     long v = atol(line + 6);
     if (v <= 0) {
       rplog(F("_ ERR BAD_FREQ\n"), rp);
@@ -431,19 +439,19 @@ void handleInboundFromRP(const char* line) {
       return;
     }
     customScanList[customScanLen++] = (uint32_t)v;
-    sendKV("_ LEN", (long)customScanLen);
+    sendKV("_ >LEN", (long)customScanLen);
     return;
   }
   if (!strncmp(line, "SDELAY ", 7)) {
-    rplog(F("_ Scan delay:\n"), rp);
+    rplog(F("_ >Scan delay:\n"), rp);
     long v = atol(line + 7);
     if (v < 10) v = 10;
     scanDelayMs = (uint32_t)v;
-    sendKV("_ DELAY", (long)scanDelayMs);
+    sendKV("_ >DELAY", (long)scanDelayMs);
     return;
   }
   if (!strncmp(line, "SCAN USE ", 9)) {
-    rplog(F("_ Scan source (hard/custom):\n"), rp);
+    rplog(F("_ >Scan source (hard/custom):\n"), rp);
     const char* p = line + 9;
     if (!strcasecmp(p, "H") || !strcasecmp(p, "HARD")) scanUse(0);
     else if (!strcasecmp(p, "C") || !strcasecmp(p, "CUSTOM")) scanUse(1);
@@ -451,11 +459,11 @@ void handleInboundFromRP(const char* line) {
       rplog(F("_ ERR SRC\n"), rp);
       return;
     }
-    sendKV("_ SRC", scanSrc ? 1 : 0);
+    sendKV("_ >SRC", scanSrc ? 1 : 0);
     return;
   }
   if (!strncmp(line, "SCAN ", 5)) {
-    rplog(F("_ Scan status query:\n"), rp);
+    rplog(F("_ >Scan status query:\n"), rp);
     char buf[CMD_BUF_SZ];
     strncpy(buf, line, CMD_BUF_SZ - 1);
     buf[CMD_BUF_SZ - 1] = '\0';
@@ -571,6 +579,8 @@ void setup() {
   pinMode(band, INPUT_PULLUP);
   pinMode(rx_tx, INPUT_PULLUP);
   rp.begin(BAUD);
+  rplog(F("SHB\n"), rp);         // Invalidate synchash for RP2040
+  rplog(F("_ NANOBOOT\n"), rp);  // Message RP2040 Nano is booting
   rplog(F("P\n"), rp);
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
   si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
