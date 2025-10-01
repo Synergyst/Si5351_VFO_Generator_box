@@ -1,6 +1,5 @@
 #include <Adafruit_SSD1306.h>   // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
 #include <Adafruit_NeoPixel.h>  // WS2812 LED
-//#include <Rotary.h>             // Ben Buxton https://github.com/brianlow/Rotary
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
 #define LED_PIN 16
@@ -32,7 +31,6 @@ unsigned int period = 100;
 unsigned long time_now = 0;
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
 Adafruit_SSD1306 displayAlt = Adafruit_SSD1306(128, 64, &Wire);
-//Rotary r = Rotary(rotRight, rotLeft);
 // Encoder state
 static uint8_t encPrev = 0;
 static int8_t encAccum = 0;
@@ -44,8 +42,6 @@ static const int8_t encTable[16] = {
 };
 // --------- Line Reader (newline-terminated) ----------
 static const size_t CMD_BUF_SZ = 128;
-//static char s1Buf[CMD_BUF_SZ];
-//static size_t s1Len = 0;
 
 // Serial1 (Nano link)
 static char s1Buf[CMD_BUF_SZ];
@@ -509,8 +505,9 @@ static void drawScanUiOverlay() {
 
 void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;
+  const bool fromUSB = (&io == &Serial);
 
-  if (line[0] == '_' && !(&io == static_cast<Stream*>(&Serial))) {
+  if (line[0] == '_' && !fromUSB) {
     const char* msg = line + 1;
     if (*msg == ' ') ++msg;
     Serial.println(msg);
@@ -535,32 +532,32 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
-  if (!strcmp(line, "Q") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "Q") && !fromUSB) {
     sendStateToNano();
     return;
   }
-  if (!strcmp(line, "R") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "R") && !fromUSB) {
     set_frequency(1);
     return;
   }
-  if (!strcmp(line, "L") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "L") && !fromUSB) {
     set_frequency(-1);
     return;
   }
-  if (!strcmp(line, "T") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "T") && !fromUSB) {
     time_now = (millis() + 300);
     setstep();
     delay(300);
     return;
   }
-  if (!strcmp(line, "B") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "B") && !fromUSB) {
     time_now = (millis() + 300);
     inc_preset();
     delay(300);
     return;
   }
   // When we successfully retune
-  if (!strcmp(line, "K") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "K") && !fromUSB) {
     /*Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
@@ -568,9 +565,9 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "F?") && &io == static_cast<Stream*>(&Serial)) {
+  if (!strcmp(line, "F?") && fromUSB) {
     Serial.print("RP2040Zero ");
-    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    if (fromUSB) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
     Serial.printf(": tuned to: %u\n", freq);
     time_now = millis();
@@ -580,27 +577,27 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "TX") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "TX") && !fromUSB) {
     sts = 1;
     s1SendKV("IF", 0);
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "RX") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "RX") && !fromUSB) {
     sts = 0;
     s1SendKV("IF", interfreq);
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "OK") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "OK") && !fromUSB) {
     Serial.print("RP2040Zero ");
-    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    if (fromUSB) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
     Serial.print(": got OK from Nano MCU\n");
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "SHK") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "SHK") && !fromUSB) {
     /*Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
@@ -612,9 +609,9 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "SHB") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "SHB") && !fromUSB) {
     Serial.print("RP2040Zero ");
-    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    if (fromUSB) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
     Serial.print(": SYNCHASH BAD\n");
     display.setTextSize(1);
@@ -626,7 +623,7 @@ void handleCommand(const char* line, Stream& io) {
   }
   if (!strcmp(line, "PONG")) {
     Serial.print("RP2040Zero ");
-    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    if (fromUSB) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
     Serial.print(": got PONG from Nano MCU\n");
     time_now = millis();
@@ -634,7 +631,7 @@ void handleCommand(const char* line, Stream& io) {
   }
   if (!strcmp(line, "READY")) {
     Serial.print("RP2040Zero ");
-    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    if (fromUSB) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
     Serial.print(": got READY from Nano MCU\n");
     time_now = millis();
@@ -658,7 +655,7 @@ void handleCommand(const char* line, Stream& io) {
   }
 
   // Scanner UI mirror + forward
-  if (!strcmp(line, "SCAN?") && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strcmp(line, "SCAN?") && !fromUSB) {
     Serial.println("_ UI Scan values (RP2040 mirror):");
     Serial.print("_ SCAN ");
     Serial.println(uiScanOn ? 1 : 0);
@@ -672,32 +669,32 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strncmp(line, "SLCLR", 5) && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strncmp(line, "SLCLR", 5) && !fromUSB) {
     uiCustomScanLen = 0;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SLADD ", 6) && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strncmp(line, "SLADD ", 6) && !fromUSB) {
     long v = atol(line + 6);
     if (v > 0 && uiCustomScanLen < UI_MAX_CUSTOM_SCAN) uiCustomScanList[uiCustomScanLen++] = (uint32_t)v;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SDELAY ", 7) && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strncmp(line, "SDELAY ", 7) && !fromUSB) {
     long v = atol(line + 7);
     if (v < 10) v = 10;
     uiScanDelayMs = (uint32_t)v;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SCAN USE ", 9) && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strncmp(line, "SCAN USE ", 9) && !fromUSB) {
     const char* p = line + 9;
     if (!strcasecmp(p, "H") || !strcasecmp(p, "HARD")) uiScanUse(0);
     else if (!strcasecmp(p, "C") || !strcasecmp(p, "CUSTOM")) uiScanUse(1);
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SCAN ", 5) && !(&io == static_cast<Stream*>(&Serial))) {
+  if (!strncmp(line, "SCAN ", 5) && !fromUSB) {
     char buf[CMD_BUF_SZ];
     strncpy(buf, line, CMD_BUF_SZ - 1);
     buf[CMD_BUF_SZ - 1] = '\0';
@@ -765,9 +762,9 @@ void handleCommand(const char* line, Stream& io) {
       x = (byte)val;
       time_now = millis();
       return;
-    } else if (!strcmp(key, "OK-F") && matched == 2 && !(&io == static_cast<Stream*>(&Serial))) {
+    } else if (!strcmp(key, "OK-F") && matched == 2 && !fromUSB) {
       Serial.print("RP2040Zero ");
-      if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+      if (fromUSB) Serial.print("(from USB)");
       else Serial.print("(from Nano)");
       Serial.printf(": OK-F %u\n", (long)val);
       time_now = millis();
@@ -776,11 +773,11 @@ void handleCommand(const char* line, Stream& io) {
   }
   // Unknown command -> optionally report over USB and forward if from USB
   Serial.print("RP2040Zero ");
-  if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+  if (fromUSB) Serial.print("(from USB)");
   else Serial.print("(from Nano)");
   Serial.print(": Unknown cmd: ");
   Serial.println(line);
-  if (&io == static_cast<Stream*>(&Serial)) {
+  if (fromUSB) {
     Serial.println("Passing to Nano since command came from USB console..");
     Serial1.println(line);
   }
@@ -920,11 +917,6 @@ void loop() {
     tunegen();
     freqold = freq;
   }
-  /*if (interfreqold != interfreq) {
-    time_now = millis();
-    tunegen();
-    interfreqold = interfreq;
-  }*/
   if (interfreqold != interfreq) {
     time_now = millis();
     // Make sure IF kHz is sent to Nano when it changes
