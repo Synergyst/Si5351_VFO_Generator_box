@@ -1,6 +1,6 @@
 #include <Adafruit_SSD1306.h>   // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
 #include <Adafruit_NeoPixel.h>  // WS2812 LED
-#include <Rotary.h>             // Ben Buxton https://github.com/brianlow/Rotary
+//#include <Rotary.h>             // Ben Buxton https://github.com/brianlow/Rotary
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
 #define LED_PIN 16
@@ -21,6 +21,7 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define rotRight 6  // The pin used by rotary-right input.
 unsigned long freq, freqold, fstep;
 long interfreq = IF, interfreqold = 0;
+static long lastSentIF = -1;
 long cal = XT_CAL_F;
 unsigned int smval;
 byte encoder = 1;
@@ -30,7 +31,8 @@ bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
-Rotary r = Rotary(rotRight, rotLeft);
+Adafruit_SSD1306 displayAlt = Adafruit_SSD1306(128, 64, &Wire);
+//Rotary r = Rotary(rotRight, rotLeft);
 // Encoder state
 static uint8_t encPrev = 0;
 static int8_t encAccum = 0;
@@ -41,10 +43,17 @@ static const int8_t encTable[16] = {
   0, +1, -1, 0
 };
 // --------- Line Reader (newline-terminated) ----------
-static const size_t CMD_BUF_SZ = 255;
+static const size_t CMD_BUF_SZ = 128;
+//static char s1Buf[CMD_BUF_SZ];
+//static size_t s1Len = 0;
+
+// Serial1 (Nano link)
 static char s1Buf[CMD_BUF_SZ];
 static size_t s1Len = 0;
 
+// USB Serial (console)
+static char sUsbBuf[CMD_BUF_SZ];
+static size_t sUsbLen = 0;
 // --------- SYNC helpers ----------
 static inline uint32_t fnv1aMix32(uint32_t h, uint32_t v) {
   h ^= v;
@@ -66,14 +75,14 @@ static uint32_t computeSyncHashRP() {
 // UI scanner gate
 static bool uiScanOn = false;
 static uint8_t uiScanSrc = 0;          // 0 = hard list, 1 = custom list
-static uint32_t uiScanDelayMs = 1000;  // per-step delay (ms)
+static uint32_t uiScanDelayMs = 5000;  // per-step delay (ms)
 static uint32_t uiScanLastMs = 0;
 static size_t uiScanIdx = 0;
 static uint32_t uiScanCurrFreqHz = 0;
 static bool uiScanPending = false;
 
 // Same hard-coded list as on Nano (Hz)
-static const uint32_t uiHardScanList[] = {
+static const uint32_t uiHardScanList[] PROGMEM = {
   /*  // Time signals (WWV/WWVH/WWVB/CHU)
   60000UL,     // 0.060 MHz - WWVB (US time standard, LF)
   2500000UL,   // 2.5 MHz  - WWV/WWVH
@@ -172,12 +181,14 @@ static const uint32_t uiHardScanList[] = {
 
 
   96300000UL,   // 96.3 MHz -
+  102500000UL,  // 102.5 MHz -
   103300000UL,  // 103.3 MHz -
+  106500000UL,  // 106.5 MHz -
   107700000UL,  // 107.7 MHz -
-  162550000UL   // 162.550 MHz - NOAA WX Ch 7
+  //162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
 static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);
-static const size_t UI_MAX_CUSTOM_SCAN = 16;
+static const size_t UI_MAX_CUSTOM_SCAN = 128;
 static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];
 static size_t uiCustomScanLen = 0;
 
@@ -477,8 +488,8 @@ static inline unsigned long uiDisplayFreqHz() {
 static void drawScanUiOverlay() {
   if (!uiScanOn) return;
   display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print("S");
+  display.setCursor(0, -2);
+  display.print("s");
   size_t len = uiCurrentListLen();
   if (len > 0) {
     const int barX0 = 96;
@@ -499,6 +510,13 @@ static void drawScanUiOverlay() {
 void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;
 
+  if (line[0] == '_' && !(&io == static_cast<Stream*>(&Serial))) {
+    const char* msg = line + 1;
+    if (*msg == ' ') ++msg;
+    Serial.println(msg);
+    return;
+  }
+
   // SYNC request from Nano
   if (!strcmp(line, "SYNC?")) {
     sendStateToNano();  // includes SYNC RP <hash>
@@ -517,35 +535,44 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
-  if (!strcmp(line, "Q")) {
+  if (!strcmp(line, "Q") && !(&io == static_cast<Stream*>(&Serial))) {
     sendStateToNano();
     return;
   }
-  if (!strcmp(line, "R")) {
+  if (!strcmp(line, "R") && !(&io == static_cast<Stream*>(&Serial))) {
     set_frequency(1);
     return;
   }
-  if (!strcmp(line, "L")) {
+  if (!strcmp(line, "L") && !(&io == static_cast<Stream*>(&Serial))) {
     set_frequency(-1);
     return;
   }
-  if (!strcmp(line, "T")) {
+  if (!strcmp(line, "T") && !(&io == static_cast<Stream*>(&Serial))) {
     time_now = (millis() + 300);
     setstep();
     delay(300);
     return;
   }
-  if (!strcmp(line, "B")) {
+  if (!strcmp(line, "B") && !(&io == static_cast<Stream*>(&Serial))) {
     time_now = (millis() + 300);
     inc_preset();
     delay(300);
     return;
   }
-  if (!strcmp(line, "K")) {
+  // When we successfully retune
+  if (!strcmp(line, "K") && !(&io == static_cast<Stream*>(&Serial))) {
+    /*Serial.print("RP2040Zero ");
+    if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
+    else Serial.print("(from Nano)");
+    Serial.printf(": Nano MCU retuned to: %u\n", freq);*/
+    time_now = millis();
+    return;
+  }
+  if (!strcmp(line, "F?") && &io == static_cast<Stream*>(&Serial)) {
     Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
-    Serial.printf(": Nano MCU retuned to: %u\n", freq);
+    Serial.printf(": tuned to: %u\n", freq);
     time_now = millis();
     return;
   }
@@ -553,19 +580,19 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "TX")) {
+  if (!strcmp(line, "TX") && !(&io == static_cast<Stream*>(&Serial))) {
     sts = 1;
     s1SendKV("IF", 0);
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "RX")) {
+  if (!strcmp(line, "RX") && !(&io == static_cast<Stream*>(&Serial))) {
     sts = 0;
     s1SendKV("IF", interfreq);
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "OK")) {
+  if (!strcmp(line, "OK") && !(&io == static_cast<Stream*>(&Serial))) {
     Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
@@ -573,7 +600,7 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "SHK")) {
+  if (!strcmp(line, "SHK") && !(&io == static_cast<Stream*>(&Serial))) {
     /*Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
@@ -585,7 +612,7 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strcmp(line, "SHB")) {
+  if (!strcmp(line, "SHB") && !(&io == static_cast<Stream*>(&Serial))) {
     Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
@@ -601,7 +628,7 @@ void handleCommand(const char* line, Stream& io) {
     Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
-    Serial.print(": got PONG from Nano MCU");
+    Serial.print(": got PONG from Nano MCU\n");
     time_now = millis();
     return;
   }
@@ -609,7 +636,7 @@ void handleCommand(const char* line, Stream& io) {
     Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
-    Serial.print(": got READY from Nano MCU");
+    Serial.print(": got READY from Nano MCU\n");
     time_now = millis();
     return;
   }
@@ -629,15 +656,9 @@ void handleCommand(const char* line, Stream& io) {
     Serial1.print("?\n");
     return;
   }
-  if (line[0] == '_') {
-    const char* msg = line + 1;
-    if (*msg == ' ') ++msg;
-    Serial.println(msg);
-    return;
-  }
 
   // Scanner UI mirror + forward
-  if (!strcmp(line, "SCAN?")) {
+  if (!strcmp(line, "SCAN?") && !(&io == static_cast<Stream*>(&Serial))) {
     Serial.println("_ UI Scan values (RP2040 mirror):");
     Serial.print("_ SCAN ");
     Serial.println(uiScanOn ? 1 : 0);
@@ -651,32 +672,32 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strncmp(line, "SLCLR", 5)) {
+  if (!strncmp(line, "SLCLR", 5) && !(&io == static_cast<Stream*>(&Serial))) {
     uiCustomScanLen = 0;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SLADD ", 6)) {
+  if (!strncmp(line, "SLADD ", 6) && !(&io == static_cast<Stream*>(&Serial))) {
     long v = atol(line + 6);
     if (v > 0 && uiCustomScanLen < UI_MAX_CUSTOM_SCAN) uiCustomScanList[uiCustomScanLen++] = (uint32_t)v;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SDELAY ", 7)) {
+  if (!strncmp(line, "SDELAY ", 7) && !(&io == static_cast<Stream*>(&Serial))) {
     long v = atol(line + 7);
     if (v < 10) v = 10;
     uiScanDelayMs = (uint32_t)v;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SCAN USE ", 9)) {
+  if (!strncmp(line, "SCAN USE ", 9) && !(&io == static_cast<Stream*>(&Serial))) {
     const char* p = line + 9;
     if (!strcasecmp(p, "H") || !strcasecmp(p, "HARD")) uiScanUse(0);
     else if (!strcasecmp(p, "C") || !strcasecmp(p, "CUSTOM")) uiScanUse(1);
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SCAN ", 5)) {
+  if (!strncmp(line, "SCAN ", 5) && !(&io == static_cast<Stream*>(&Serial))) {
     char buf[CMD_BUF_SZ];
     strncpy(buf, line, CMD_BUF_SZ - 1);
     buf[CMD_BUF_SZ - 1] = '\0';
@@ -744,7 +765,7 @@ void handleCommand(const char* line, Stream& io) {
       x = (byte)val;
       time_now = millis();
       return;
-    } else if (!strcmp(key, "OK-F") && matched == 2) {
+    } else if (!strcmp(key, "OK-F") && matched == 2 && !(&io == static_cast<Stream*>(&Serial))) {
       Serial.print("RP2040Zero ");
       if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
       else Serial.print("(from Nano)");
@@ -796,7 +817,7 @@ void setup() {
   strip.begin();
   strip.show();
   strip.setBrightness(255);
-  strip.setPixelColor(0, 255, 96, 128);
+  strip.setPixelColor(0, 255, 255, 255);
   strip.show();
   Wire.setClock(100000);
   Wire.begin();
@@ -809,11 +830,19 @@ void setup() {
   display.setTextColor(WHITE);
   display.display();
   display.setTextSize(1);
-  display.setCursor(10, 32);
-  display.println("Ensure power switch");
-  display.setCursor(48, 42);
-  display.print("is on!");
-  display.display();
+
+  displayAlt.begin(SSD1306_SWITCHCAPVCC, 0x3D);
+  displayAlt.clearDisplay();
+  displayAlt.setTextColor(WHITE);
+  displayAlt.display();
+  displayAlt.setTextSize(1);
+
+  displayAlt.setCursor(10, 32);
+  displayAlt.println("Ensure power switch");
+  displayAlt.setCursor(48, 42);
+  displayAlt.print("is on!");
+  displayAlt.display();
+
   display.setCursor(0, 0);
   animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 750, 250, 0.3f, 0.025f);
   bootExplosion(display, 400);
@@ -872,6 +901,8 @@ void setup() {
       delay(500);
     }
   }
+  displayAlt.clearDisplay();
+  displayAlt.display();
   Serial.println("RP2040Zero (boot): Running loop now..\n");
 }
 
@@ -879,8 +910,8 @@ void loop() {
   if (readLine(Serial1, s1Buf, s1Len, CMD_BUF_SZ)) {
     handleCommand(s1Buf, Serial1);
   }
-  if (readLine(Serial, s1Buf, s1Len, CMD_BUF_SZ)) {
-    handleCommand(s1Buf, Serial);
+  if (readLine(Serial, sUsbBuf, sUsbLen, CMD_BUF_SZ)) {
+    handleCommand(sUsbBuf, Serial);
   }
   pollEncoder();
   uiScanTick();
@@ -889,9 +920,19 @@ void loop() {
     tunegen();
     freqold = freq;
   }
-  if (interfreqold != interfreq) {
+  /*if (interfreqold != interfreq) {
     time_now = millis();
     tunegen();
+    interfreqold = interfreq;
+  }*/
+  if (interfreqold != interfreq) {
+    time_now = millis();
+    // Make sure IF kHz is sent to Nano when it changes
+    if (interfreq != lastSentIF) {
+      s1SendKV("IF", interfreq);
+      lastSentIF = interfreq;
+    }
+    tunegen();  // still okay to send F (or you can skip if not needed)
     interfreqold = interfreq;
   }
   if (xo != x) {
@@ -908,6 +949,7 @@ void loop() {
 }
 
 void tunegen() {
+  if (uiScanOn) return;  // Mirror mode: don’t drive the Nano
   Serial1.printf("F %u\n", (unsigned long)freq);
 }
 
