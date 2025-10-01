@@ -37,7 +37,7 @@ static bool debouncedTx = false;
 static bool lastAnnouncedTx = false;
 static unsigned long rxtxLastEdgeMs = 0;
 // --------- Line Reader (newline-terminated) ----------
-static const size_t CMD_BUF_SZ = 255;
+static const size_t CMD_BUF_SZ = 128;
 static char rpRxBuf[CMD_BUF_SZ];
 static size_t rpRxLen = 0;
 
@@ -183,14 +183,15 @@ void sendHelp() {
   rplog(F("_ NOTES:\n"), rp);
   rplog(F("_   - TX pauses scanning automatically; RX resumes.\n"), rp);
   rplog(F("_   - Post-tuning, device emits 'K'. Signal meter: 'SM <1..14>'.\n"), rp);
+  rplog(F("_ End of help\n"), rp);
 }
 // --------- Frequency Scanner ----------
 static bool scanOn = false;
 static uint8_t scanSrc = 0;          // 0 = hard-coded list, 1 = custom list
-static uint32_t scanDelayMs = 1000;  // per-step delay
+static uint32_t scanDelayMs = 5000;  // per-step delay
 static uint32_t lastScanMs = 0;
 static size_t scanIdx = 0;
-static const uint32_t hardScanList[] = {
+static const uint32_t hardScanList[] PROGMEM = {
   /*  // Time signals (WWV/WWVH/WWVB/CHU)
   60000UL,     // 0.060 MHz - WWVB (US time standard, LF)
   2500000UL,   // 2.5 MHz  - WWV/WWVH
@@ -289,12 +290,14 @@ static const uint32_t hardScanList[] = {
 
 
   96300000UL,   // 96.3 MHz -
+  102500000UL,  // 102.5 MHz -
   103300000UL,  // 103.3 MHz -
+  106500000UL,  // 106.5 MHz - 
   107700000UL,  // 107.7 MHz -
-  162550000UL   // 162.550 MHz - NOAA WX Ch 7
+  //162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
 static const size_t hardScanLen = sizeof(hardScanList) / sizeof(hardScanList[0]);
-static const size_t MAX_CUSTOM_SCAN = 16;
+static const size_t MAX_CUSTOM_SCAN = 128;
 static uint32_t customScanList[MAX_CUSTOM_SCAN];
 static size_t customScanLen = 0;
 static inline size_t currentListLen() {
@@ -533,6 +536,8 @@ void handleInboundFromRP(const char* line) {
       x = (byte)v;
     }
   }
+  Serial.print(F("_ Nano: Unknown cmd: "));
+  Serial.println(line);
 }
 // --------- Signal meter sampling + send when changed ----------
 uint8_t lastSMBucket = 0;
