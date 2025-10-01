@@ -556,12 +556,12 @@ void handleCommand(const char* line, Stream& io) {
     delay(300);
     return;
   }
-  // When we successfully retune
   if (!strcmp(line, "K") && !fromUSB) {
-    /*Serial.print("RP2040Zero ");
+    // When we successfully retune
+    Serial.print("RP2040Zero ");
     if (&io == static_cast<Stream*>(&Serial)) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
-    Serial.printf(": Nano MCU retuned to: %u\n", freq);*/
+    Serial.printf(": Nano MCU retuned to: %u\n", freq);
     time_now = millis();
     return;
   }
@@ -570,6 +570,7 @@ void handleCommand(const char* line, Stream& io) {
     if (fromUSB) Serial.print("(from USB)");
     else Serial.print("(from Nano)");
     Serial.printf(": tuned to: %u\n", freq);
+    Serial1.print("F?\n");
     time_now = millis();
     return;
   }
@@ -669,32 +670,32 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
-  if (!strncmp(line, "SLCLR", 5) && !fromUSB) {
+  if (!strncmp(line, "SLCLR", 5)) {
     uiCustomScanLen = 0;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SLADD ", 6) && !fromUSB) {
+  if (!strncmp(line, "SLADD ", 6)) {
     long v = atol(line + 6);
     if (v > 0 && uiCustomScanLen < UI_MAX_CUSTOM_SCAN) uiCustomScanList[uiCustomScanLen++] = (uint32_t)v;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SDELAY ", 7) && !fromUSB) {
+  if (!strncmp(line, "SDELAY ", 7)) {
     long v = atol(line + 7);
     if (v < 10) v = 10;
     uiScanDelayMs = (uint32_t)v;
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SCAN USE ", 9) && !fromUSB) {
+  if (!strncmp(line, "SCAN USE ", 9)) {
     const char* p = line + 9;
     if (!strcasecmp(p, "H") || !strcasecmp(p, "HARD")) uiScanUse(0);
     else if (!strcasecmp(p, "C") || !strcasecmp(p, "CUSTOM")) uiScanUse(1);
     if (&io == static_cast<Stream*>(&Serial)) Serial1.println(line);
     return;
   }
-  if (!strncmp(line, "SCAN ", 5) && !fromUSB) {
+  if (!strncmp(line, "SCAN ", 5)) {
     char buf[CMD_BUF_SZ];
     strncpy(buf, line, CMD_BUF_SZ - 1);
     buf[CMD_BUF_SZ - 1] = '\0';
