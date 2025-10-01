@@ -188,6 +188,319 @@ static const size_t UI_MAX_CUSTOM_SCAN = 128;
 static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];
 static size_t uiCustomScanLen = 0;
 
+// ------------- Alt Display Dashboard (0x3D) -------------
+enum AltPage : uint8_t { ALT_SCAN = 0,
+                         ALT_SMETER = 1,
+                         ALT_LINK = 2,
+                         ALT_LOG = 3 };
+static bool altAutoRotate = true;
+static AltPage altPage = ALT_SCAN;
+static uint32_t altLastPgMs = 0;
+static const uint32_t ALT_ROTATE_MS = 7000;
+
+// Event log (6 lines x 21 chars)
+static char altLogBuf[6][22];
+static uint8_t altLogHead = 0;
+static inline void altLogAdd(const char* msg) {
+  if (!msg) return;
+  char line[22];
+  snprintf(line, sizeof(line), "%.21s", msg);
+  strncpy(altLogBuf[altLogHead], line, sizeof(altLogBuf[altLogHead]));
+  altLogHead = (uint8_t)((altLogHead + 1) % 6);
+}
+
+// S-meter history (x: 1..14)
+static uint8_t altSmHist[128];
+static uint8_t altSmPos = 0;
+static uint32_t altSmLastMs = 0;
+static const uint16_t ALT_SM_DT = 100;
+
+// Small formatter for frequency lines (kHz/MHz)
+static void altFmtFreq(char* out, size_t sz, uint32_t hz) {
+  if (hz < 1000000UL) {
+    uint32_t k = hz / 1000UL, r = hz % 1000UL;
+    snprintf(out, sz, "%3lu.%03lu kHz", (unsigned long)k, (unsigned long)r);
+  } else {
+    uint32_t m = hz / 1000000UL, k = (hz % 1000000UL) / 1000UL;
+    snprintf(out, sz, "%3lu.%03lu MHz", (unsigned long)m, (unsigned long)k);
+  }
+}
+
+// Draw: Scan dashboard
+static void altDrawScan() {
+  displayAlt.clearDisplay();
+  displayAlt.setTextSize(1);
+  displayAlt.setCursor(0, 0);
+  displayAlt.print("Scan ");
+
+  // Progress bar across top
+  uint32_t now = millis();
+  uint32_t elapsed = (now - uiScanLastMs);
+  uint8_t p = 0;
+  if (uiScanDelayMs > 0 && elapsed < uiScanDelayMs) {
+    p = (uint8_t)((elapsed * 100UL) / uiScanDelayMs);
+    if (p > 100) p = 100;
+  } else if (uiScanOn) {
+    p = 100;
+  }
+  displayAlt.drawRect(60, 0, 66, 8, WHITE);
+  if (p > 0) {
+    uint8_t w = (uint8_t)((64UL * p) / 100UL);
+    if (w > 64) w = 64;
+    displayAlt.fillRect(61, 1, w, 6, WHITE);
+  }
+
+  // Show current + next two
+  size_t len = uiScanSrc ? uiCustomScanLen : uiHardScanLen;
+  const uint32_t* list = uiScanSrc ? uiCustomScanList : uiHardScanList;
+  if (len == 0) {
+    displayAlt.setCursor(0, 16);
+    displayAlt.print("(empty list)");
+    displayAlt.display();
+    return;
+  }
+
+  // Current item index (the one just set on last tick)
+  size_t currIdx = (uiScanIdx == 0) ? (len - 1) : (uiScanIdx - 1);
+
+  char buf[24];
+  // Current
+  displayAlt.setCursor(0, 16);
+  displayAlt.print(">");
+  altFmtFreq(buf, sizeof(buf), list[currIdx]);
+  displayAlt.setCursor(8, 16);
+  displayAlt.print(buf);
+
+  // Next 1
+  displayAlt.setCursor(0, 28);
+  size_t nxt1 = (currIdx + 1) % len;
+  altFmtFreq(buf, sizeof(buf), list[nxt1]);
+  displayAlt.print(" ");
+  displayAlt.print(buf);
+
+  // Next 2
+  displayAlt.setCursor(0, 40);
+  size_t nxt2 = (currIdx + 2) % len;
+  altFmtFreq(buf, sizeof(buf), list[nxt2]);
+  displayAlt.print(" ");
+  displayAlt.print(buf);
+
+  // Footer: source + delay
+  displayAlt.setCursor(0, 56);
+  displayAlt.print(uiScanSrc ? "SRC:C" : "SRC:H");
+  displayAlt.setCursor(42, 56);
+  displayAlt.print("D:");
+  displayAlt.print((unsigned long)uiScanDelayMs);
+  displayAlt.print("ms");
+
+  displayAlt.display();
+}
+
+// Draw: S-meter trend (x: 1..14)
+static void altDrawSmeter() {
+  displayAlt.clearDisplay();
+  displayAlt.setTextSize(1);
+  displayAlt.setCursor(0, 0);
+  displayAlt.print("S-meter trend");
+
+  // Axis and grid
+  displayAlt.drawLine(0, 63, 127, 63, WHITE);  // baseline
+  displayAlt.drawLine(0, 10, 0, 63, WHITE);    // Y axis
+  for (int g = 1; g <= 14; g += 2) {
+    uint8_t y = 63 - (uint8_t)((g - 1) * 3);  // 14 steps => ~42 px tall
+    displayAlt.drawFastHLine(2, y, 125, (g == 13 || g == 7) ? WHITE : 1);
+  }
+
+  // Plot (left->right shows oldest->newest)
+  for (int i = 0; i < 128; ++i) {
+    uint8_t v = altSmHist[(uint8_t)(altSmPos + i) & 127];  // 1..14
+    if (v < 1) v = 1;
+    if (v > 14) v = 14;
+    uint8_t yTop = 63 - (uint8_t)((v - 1) * 3);
+    displayAlt.drawFastVLine(i, yTop, (uint8_t)(63 - yTop), WHITE);
+  }
+
+  displayAlt.display();
+}
+
+// Draw: Link/status
+static void altDrawLink() {
+  displayAlt.clearDisplay();
+  displayAlt.setTextSize(1);
+  displayAlt.setCursor(0, 0);
+  displayAlt.print("Link/Status");
+
+  // RX/TX and IF
+  displayAlt.setCursor(0, 14);
+  displayAlt.print("Mode: ");
+  displayAlt.print(sts ? "TX" : "RX");
+
+  displayAlt.setCursor(70, 14);
+  displayAlt.print("IF:");
+  displayAlt.print(interfreq);
+  displayAlt.print("k");
+
+  // Step
+  displayAlt.setCursor(0, 26);
+  displayAlt.print("Step:");
+  switch (stp) {
+    case 2: displayAlt.print("1Hz"); break;
+    case 3: displayAlt.print("10Hz"); break;
+    case 4: displayAlt.print("1kHz"); break;
+    case 5: displayAlt.print("5kHz"); break;
+    case 6: displayAlt.print("10kHz"); break;
+    case 7: displayAlt.print("100kHz"); break;
+    case 8: displayAlt.print("1MHz"); break;
+    case 1:
+    default: displayAlt.print("10MHz"); break;
+  }
+
+  // Scan state
+  displayAlt.setCursor(0, 38);
+  displayAlt.print("Scan: ");
+  displayAlt.print(uiScanOn ? "ON" : "OFF");
+  if (uiScanOn) {
+    displayAlt.print("  Len:");
+    displayAlt.print((unsigned long)(uiScanSrc ? uiCustomScanLen : uiHardScanLen));
+  }
+
+  // Time since last meaningful activity (time_now is updated all over your code)
+  uint32_t age = millis() - time_now;
+  displayAlt.setCursor(0, 50);
+  displayAlt.print("Last activity: ");
+  displayAlt.print((unsigned long)age);
+  displayAlt.print("ms");
+
+  displayAlt.display();
+}
+
+// Draw: event log
+static void altDrawLog() {
+  displayAlt.clearDisplay();
+  displayAlt.setTextSize(1);
+  displayAlt.setCursor(0, 0);
+  displayAlt.print("Event log");
+
+  // Print newest at bottom
+  for (int i = 0; i < 6; ++i) {
+    uint8_t idx = (uint8_t)((altLogHead + i) % 6);
+    displayAlt.setCursor(0, 10 + i * 9);
+    displayAlt.print(altLogBuf[idx]);
+  }
+  displayAlt.display();
+}
+
+// Update internal sensors for alt pages
+static void altUpdateSmHist() {
+  uint32_t now = millis();
+  if ((now - altSmLastMs) >= ALT_SM_DT) {
+    altSmLastMs = now;
+    altSmHist[altSmPos] = x;  // 1..14
+    altSmPos = (uint8_t)((altSmPos + 1) & 127);
+  }
+}
+
+// Auto-rotate pages unless scanning (scan page wins)
+static void altMaybeRotate() {
+  if (!altAutoRotate) return;
+  if (uiScanOn) return;  // lock to scan page during scan
+  uint32_t now = millis();
+  if ((now - altLastPgMs) >= ALT_ROTATE_MS) {
+    altLastPgMs = now;
+    altPage = (AltPage)((((int)altPage) + 1) % 4);
+  }
+}
+
+// One-shot change of page (resets timer)
+static inline void altSetPage(uint8_t p) {
+  altPage = (AltPage)p;
+  altLastPgMs = millis();
+}
+
+// Called from setup()
+static void altInit() {
+  memset(altLogBuf, 0, sizeof(altLogBuf));
+  for (int i = 0; i < 128; ++i) altSmHist[i] = 1;
+  altLogAdd("Alt dashboard ready");
+  altLastPgMs = millis();
+}
+
+// Called each loop() tick
+static void altTick() {
+  static bool prevScanOn = false;
+  static uint8_t prevSTS = 255;
+  static long prevIF = -1;
+
+  // Background updates
+  altUpdateSmHist();
+
+  // Auto rotate if allowed
+  altMaybeRotate();
+
+  // Auto: show scan page while scanning
+  if (uiScanOn) {
+    altDrawScan();
+  } else {
+    switch (altPage) {
+      case ALT_SCAN: altDrawScan(); break;
+      case ALT_SMETER: altDrawSmeter(); break;
+      case ALT_LINK: altDrawLink(); break;
+      case ALT_LOG: altDrawLog(); break;
+    }
+  }
+
+  // Lightweight event logging without touching handleCommand():
+  if (prevScanOn != uiScanOn) {
+    altLogAdd(uiScanOn ? "Scan: START" : "Scan: STOP");
+    prevScanOn = uiScanOn;
+  }
+  if (prevSTS != (uint8_t)sts) {
+    altLogAdd(sts ? "Mode: TX" : "Mode: RX");
+    prevSTS = (uint8_t)sts;
+  }
+  if (prevIF != interfreq) {
+    char b[22];
+    snprintf(b, sizeof(b), "IF=%ldk", (long)interfreq);
+    altLogAdd(b);
+    prevIF = interfreq;
+  }
+}
+
+// OPTIONAL: minimal USB console control, add into handleCommand() before "Unknown cmd" block
+static bool altHandleCmd(const char* line, Stream& io) {
+  if (strncmp(line, "ALT", 3) != 0) return false;
+
+  // Examples:
+  //   ALT PAGE 0..3   (0=SCAN,1=SMETER,2=LINK,3=LOG)
+  //   ALT AUTO 0|1
+  //   ALT NEXT
+  char cmd[8] = { 0 };
+  char arg[8] = { 0 };
+  long v = -1;
+  int m = sscanf(line, "%7s %7s %ld", cmd, arg, &v);
+  if (m >= 2 && !strcasecmp(arg, "PAGE") && m == 3) {
+    if (v >= 0 && v <= 3) {
+      altAutoRotate = false;
+      altSetPage((AltPage)v);
+    }
+    io.println("_ ALT PAGE OK");
+    return true;
+  }
+  if (m >= 2 && !strcasecmp(arg, "AUTO") && m == 3) {
+    altAutoRotate = (v != 0);
+    io.println("_ ALT AUTO OK");
+    return true;
+  }
+  if (m >= 2 && !strcasecmp(arg, "NEXT")) {
+    altAutoRotate = false;
+    altSetPage((AltPage)((((int)altPage) + 1) % 4));
+    io.println("_ ALT NEXT OK");
+    return true;
+  }
+  io.println("_ ALT ?");
+  return true;
+}
+
 inline void pollEncoder() {
   uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
   uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
@@ -785,6 +1098,7 @@ void handleCommand(const char* line, Stream& io) {
       return;
     }
   }
+  //if (altHandleCmd(line, io)) return;
   // Unknown command -> optionally report over USB and forward if from USB
   Serial.print("RP2040Zero ");
   if (fromUSB) Serial.print("(from USB)");
@@ -847,6 +1161,8 @@ void setup() {
   displayAlt.setTextColor(WHITE);
   displayAlt.display();
   displayAlt.setTextSize(1);
+  displayAlt.display();
+  altInit();
 
   displayAlt.setCursor(10, 32);
   displayAlt.println("Ensure power switch");
@@ -960,6 +1276,7 @@ void loop() {
     lastDraw = millis();
     displayfreq();
     layout();
+    altTick();  // displayAlt
   }
 }
 
