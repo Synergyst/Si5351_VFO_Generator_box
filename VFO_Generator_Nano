@@ -324,7 +324,7 @@ void doScanStartNow() {
   scanOn = true;
   scanIdx = 0;
   lastScanMs = millis() - scanDelayMs;
-  rplog(F("_ >SCAN 1\n"), rp);
+  rplog(F("_ SCAN 1\n"), rp);
 }
 // Gated start (ensures sync before starting)
 void scanStart() {
@@ -337,7 +337,7 @@ void scanStart() {
 
 void scanStop() {
   scanOn = false;
-  rplog(F("_ >SCAN 0\n"), rp);
+  rplog(F("_ SCAN 0\n"), rp);
 }
 void scanTick() {
   if (!scanOn || sts) return;
@@ -416,10 +416,10 @@ void handleInboundFromRP(const char* line) {
 
   if (!strcmp(line, "SCAN?")) {
     rplog(F("_ >Scan values query:\n"), rp);
-    sendKV("_ >SCAN", scanOn ? 1 : 0);
-    sendKV("_ >SRC", scanSrc ? 1 : 0);
-    sendKV("_ >DELAY", (long)scanDelayMs);
-    sendKV("_ >LEN", (long)currentListLen());
+    sendKV("_ SCAN", scanOn ? 1 : 0);
+    sendKV("_ SRC", scanSrc ? 1 : 0);
+    sendKV("_ DELAY", (long)scanDelayMs);
+    sendKV("_ LEN", (long)currentListLen());
     return;
   }
   if (!strcmp(line, "SLCLR")) {
@@ -428,42 +428,42 @@ void handleInboundFromRP(const char* line) {
     return;
   }
   if (!strncmp(line, "SLADD ", 6)) {
-    rplog(F("_ >Scan list add:\n"), rp);
+    //rplog(F("_ >Scan list add:\n"), rp);
     long v = atol(line + 6);
     if (v <= 0) {
-      rplog(F("_ ERR BAD_FREQ\n"), rp);
+      rplog(F("_ >ERR BAD_FREQ\n"), rp);
       return;
     }
     if (customScanLen >= MAX_CUSTOM_SCAN) {
-      rplog(F("_ ERR FULL\n"), rp);
+      rplog(F("_ >ERR FULL\n"), rp);
       return;
     }
     customScanList[customScanLen++] = (uint32_t)v;
-    sendKV("_ >LEN", (long)customScanLen);
+    sendKV("_ LEN", (long)customScanLen);
     return;
   }
   if (!strncmp(line, "SDELAY ", 7)) {
-    rplog(F("_ >Scan delay:\n"), rp);
+    //rplog(F("_ >Scan delay:\n"), rp);
     long v = atol(line + 7);
     if (v < 10) v = 10;
     scanDelayMs = (uint32_t)v;
-    sendKV("_ >DELAY", (long)scanDelayMs);
+    sendKV("_ DELAY", (long)scanDelayMs);
     return;
   }
   if (!strncmp(line, "SCAN USE ", 9)) {
-    rplog(F("_ >Scan source (hard/custom):\n"), rp);
+    //rplog(F("_ >Scan source (hard/custom):\n"), rp);
     const char* p = line + 9;
     if (!strcasecmp(p, "H") || !strcasecmp(p, "HARD")) scanUse(0);
     else if (!strcasecmp(p, "C") || !strcasecmp(p, "CUSTOM")) scanUse(1);
     else {
-      rplog(F("_ ERR SRC\n"), rp);
+      rplog(F("_ >ERR SRC\n"), rp);
       return;
     }
-    sendKV("_ >SRC", scanSrc ? 1 : 0);
+    sendKV("_ SRC", scanSrc ? 1 : 0);
     return;
   }
   if (!strncmp(line, "SCAN ", 5)) {
-    rplog(F("_ >Scan status query:\n"), rp);
+    //rplog(F("_ >Scan status query:\n"), rp);
     char buf[CMD_BUF_SZ];
     strncpy(buf, line, CMD_BUF_SZ - 1);
     buf[CMD_BUF_SZ - 1] = '\0';
@@ -502,7 +502,7 @@ void handleInboundFromRP(const char* line) {
       scanStart();  // gated by SYNC
       return;
     }
-    rplog(F("_ ERR SCAN\n"), rp);
+    rplog(F("_ >ERR SCAN\n"), rp);
     return;
   }
 
@@ -558,6 +558,7 @@ uint8_t lastSMBucket = 0;
 unsigned long lastSMSendMs = 0;
 const unsigned long SM_MIN_SEND_INTERVAL_MS = 10;
 void sampleAndSendSignalMeter() {
+  if (scanOn) return;  // no SM during scan
   unsigned int raw = analogRead(adc);
   uint8_t bucket = map(raw, 0, S_GAIN, 1, 14);
   if (bucket > 14) bucket = 14;
@@ -631,11 +632,11 @@ void loop() {
   scanTick();
 
   uint32_t now = millis();
-  if ((now - lastBeatMs) >= beatIntervalMs) {
+  if (!scanOn && (now - lastBeatMs) >= beatIntervalMs) {
     lastBeatMs += beatIntervalMs;
     rplog(F("P\n"), rp);
   }
-  if ((now - lastQueryMs) >= queryIntervalMs) {
+  if (!scanOn && (now - lastQueryMs) >= queryIntervalMs) {
     lastQueryMs += queryIntervalMs;
     rplog(F("Q\n"), rp);
     // If we had asked for sync but didn't get it yet, retry occasionally
@@ -648,5 +649,5 @@ void tunegen() {
   uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
   uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
   si5351.set_freq(outCentiHz, SI5351_CLK0);
-  rplog(F("K\n"), rp);
+  if (!scanOn) rplog(F("K\n"), rp);  // suppress during scan
 }
