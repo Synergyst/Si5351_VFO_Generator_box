@@ -506,7 +506,20 @@ static void drawScanUiOverlay() {
 void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;
   const bool fromUSB = (&io == &Serial);
+  // 1) Handle SCAN ACKs first so they are not swallowed by the '_' logger
+  if (!strncmp(line, "_ SCAN ", 7) || !strncmp(line, "_ >SCAN ", 8)) {
+    const char* p = (line[2] == '>') ? (line + 8) : (line + 7);
+    long v = atol(p);
+    if (v == 1) {
+      uiScanPending = false;
+      uiScanStart();  // aligns mirror start with Nano ACK
+    } else {
+      uiScanStop();
+    }
+    return;
+  }
 
+  // 2) Now allow other '_' messages to be console-only
   if (line[0] == '_' && !fromUSB) {
     const char* msg = line + 1;
     if (*msg == ' ') ++msg;
@@ -918,7 +931,7 @@ void loop() {
     tunegen();
     freqold = freq;
   }
-  if (interfreqold != interfreq) {
+  /*if (interfreqold != interfreq) {
     time_now = millis();
     // Make sure IF kHz is sent to Nano when it changes
     if (interfreq != lastSentIF) {
@@ -926,6 +939,15 @@ void loop() {
       lastSentIF = interfreq;
     }
     tunegen();  // still okay to send F (or you can skip if not needed)
+    interfreqold = interfreq;
+  }*/
+  if (interfreqold != interfreq) {
+    time_now = millis();
+    if (!uiScanOn && interfreq != lastSentIF) {  // don’t push IF in scan
+      s1SendKV("IF", interfreq);
+      lastSentIF = interfreq;
+    }
+    tunegen();  // early-returns when uiScanOn
     interfreqold = interfreq;
   }
   if (xo != x) {
@@ -943,7 +965,7 @@ void loop() {
 
 void tunegen() {
   if (uiScanOn) return;  // Mirror mode: don’t drive the Nano
-  Serial1.printf("F %u\n", (unsigned long)freq);
+  Serial1.printf("F %lu\n", (unsigned long)freq);
 }
 
 void displayfreq() {
