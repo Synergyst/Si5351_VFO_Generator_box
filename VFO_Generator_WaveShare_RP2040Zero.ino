@@ -1,5 +1,6 @@
 #include <Adafruit_SSD1306.h>   // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
 #include <Adafruit_NeoPixel.h>  // WS2812 LED
+#include <si5351.h>             // Etherkit https://github.com/etherkit/Si5351Arduino
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
 #define LED_PIN 16
@@ -31,6 +32,7 @@ unsigned int period = 100;
 unsigned long time_now = 0;
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
 Adafruit_SSD1306 displayAlt = Adafruit_SSD1306(128, 64, &Wire);
+Si5351 si5351(0x60);
 // Encoder state
 static uint8_t encPrev = 0;
 static int8_t encAccum = 0;
@@ -900,6 +902,17 @@ void handleCommand(const char* line, Stream& io) {
     time_now = millis();
     return;
   }
+  if (!strcmp(line, "I2C?") && fromUSB) {
+    for (uint8_t addr = 1; addr < 127; addr++) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        Serial.print("RP2040Zero (boot): Detected I2C device on bus: 0x");
+        Serial.println(addr, HEX);
+      }
+    }
+    time_now = millis();
+    return;
+  }
   if (!strcmp(line, "P")) {
     time_now = millis();
     return;
@@ -1146,9 +1159,15 @@ void setup() {
   strip.show();
   Wire.setClock(100000);
   Wire.begin();
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+  si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+  si5351.output_enable(SI5351_CLK0, 1);
+  si5351.output_enable(SI5351_CLK1, 0);
+  si5351.output_enable(SI5351_CLK2, 0);
   count = BAND_INIT;
   bandpresets();
-  stp = 4;
+  stp = 6;
   setstep();
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
@@ -1171,7 +1190,7 @@ void setup() {
   displayAlt.display();
 
   display.setCursor(0, 0);
-  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 750, 250, 0.3f, 0.025f);
+  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
   bootExplosion(display, 400);
   display.clearDisplay();
   display.setCursor(0, 0);
@@ -1247,16 +1266,6 @@ void loop() {
     tunegen();
     freqold = freq;
   }
-  /*if (interfreqold != interfreq) {
-    time_now = millis();
-    // Make sure IF kHz is sent to Nano when it changes
-    if (interfreq != lastSentIF) {
-      s1SendKV("IF", interfreq);
-      lastSentIF = interfreq;
-    }
-    tunegen();  // still okay to send F (or you can skip if not needed)
-    interfreqold = interfreq;
-  }*/
   if (interfreqold != interfreq) {
     time_now = millis();
     if (!uiScanOn && interfreq != lastSentIF) {  // don’t push IF in scan
@@ -1283,6 +1292,9 @@ void loop() {
 void tunegen() {
   if (uiScanOn) return;  // Mirror mode: don’t drive the Nano
   Serial1.printf("F %lu\n", (unsigned long)freq);
+  uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
+  uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
+  si5351.set_freq(outCentiHz, SI5351_CLK0);
 }
 
 void displayfreq() {
@@ -1367,7 +1379,7 @@ void bandpresets() {
     case 12: freq = 15000000; break;
     case 13: freq = 17655000; break;
     case 14: freq = 21525000; break;
-    case 15: freq = 27015000; break;
+    case 15: freq = 27025000; break;
     case 16: freq = 28400000; break;
     case 17: freq = 50000000; break;
     case 18: freq = 107700000; break;
