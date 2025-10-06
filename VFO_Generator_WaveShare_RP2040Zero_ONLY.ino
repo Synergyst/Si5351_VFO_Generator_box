@@ -497,9 +497,9 @@ void handleCommand(const char* line, Stream& io) {
 
   if (!strcmp(line, "BOOTSEL") && fromUSB) {
     Serial.println("Rebooting to bootloader now!");
+    Serial.printf("\r> ");
     delay(100);
     rp2040.rebootToBootloader();
-    Serial.printf("\r> ");
     return;
   }
 
@@ -519,7 +519,9 @@ void handleCommand(const char* line, Stream& io) {
   }
 
   if (!strcmp(line, "FREQ?") && fromUSB) {
-    Serial.printf("RP2040Zero: tuned to: %u\n", freq);
+    char buf[32];
+    formatFreqSmart(freq, buf, sizeof(buf));
+    Serial.printf("RP2040Zero: tuned to: %u Hz (%s)\n", freq, buf);
     time_now = millis();
     Serial.printf("\r> ");
     return;
@@ -600,7 +602,7 @@ void setup() {
   Serial.begin(BAUD);
   //while (!Serial) {}
   delay(3000);
-  Serial.println("RP2040Zero (boot): FW VER: 1.0.2");
+  Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.2");
   Serial.println("RP2040Zero (boot): Starting now..");
 
   pinMode(rotLeft, INPUT_PULLUP);
@@ -666,7 +668,7 @@ void setup() {
   strip.setPixelColor(0, 64, 0, 32);
   strip.show();
 
-  Serial.println("RP2040Zero (boot): Running loop now..\n");
+  Serial.print("RP2040Zero (boot): Running loop now..\n\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
 }
 
 void loop() {
@@ -709,6 +711,46 @@ void tunegen() {
   uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
   uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
   si5351.set_freq(outCentiHz, SI5351_CLK0);
+}
+
+static void formatFreqSmart(uint32_t hz, char* out, size_t outSz) {
+  // Formats Hz as "### Hz", "###.### kHz", or "###.### MHz" (trims trailing zeros)
+  if (hz < 1000UL) {
+    snprintf(out, outSz, "%lu Hz", (unsigned long)hz);
+    return;
+  }
+  if (hz < 1000000UL) {  // kHz
+    uint32_t k = hz / 1000UL;
+    uint32_t rem = hz % 1000UL;  // Hz remainder -> fractional kHz
+    if (rem == 0) {
+      snprintf(out, outSz, "%lu kHz", (unsigned long)k);
+    } else {
+      char frac[4];
+      snprintf(frac, sizeof(frac), "%03lu", (unsigned long)rem);  // 3 decimals
+      int len = 3;
+      while (len > 0 && frac[len - 1] == '0') frac[--len] = '\0';
+      snprintf(out, outSz, "%lu.%s kHz", (unsigned long)k, frac);
+    }
+    return;
+  }
+  // MHz
+  uint32_t m = hz / 1000000UL;
+  uint32_t rem = hz % 1000000UL;  // 0..999999 Hz -> fractional MHz
+  if (rem == 0) {
+    snprintf(out, outSz, "%lu MHz", (unsigned long)m);
+  } else {
+    // Show kHz as the fractional part (3 decimals), trim trailing zeros
+    uint32_t frac = rem / 1000UL;  // 0..999 kHz
+    char frac3[4];
+    snprintf(frac3, sizeof(frac3), "%03lu", (unsigned long)frac);
+    int len = 3;
+    while (len > 0 && frac3[len - 1] == '0') frac3[--len] = '\0';
+    if (len == 0) {
+      snprintf(out, outSz, "%lu MHz", (unsigned long)m);
+    } else {
+      snprintf(out, outSz, "%lu.%s MHz", (unsigned long)m, frac3);
+    }
+  }
 }
 
 void displayfreq() {
