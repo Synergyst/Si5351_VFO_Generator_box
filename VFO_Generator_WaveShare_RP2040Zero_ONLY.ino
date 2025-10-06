@@ -404,6 +404,7 @@ void sendHelpRP() {
   Serial.println("HW:");
   Serial.println("  BOOTSEL               - reboot to UF2 bootloader");
   Serial.println("  I2C?                  - scan I2C bus and print devices");
+  Serial.println();
   Serial.println("Unimplemented HW buttons:");
   Serial.println("  SETSTEP               - set rotary knob step count");
   Serial.println("  INCBAND               - increment band preset");
@@ -412,7 +413,7 @@ void sendHelpRP() {
   Serial.println("  FREQ?                 - query current frequency");
   Serial.println("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
   Serial.println("  IF <kHz>              - set IF in kHz (0 .. 200000)");
-  Serial.println("  SIGMETER <1..1        - set S-meter bucket");
+  Serial.println("  SIGMETER <1..14>      - set S-meter bucket");
   Serial.println();
   Serial.println("Console editing:");
   Serial.println("  Enter (CR/LF)         - submit line");
@@ -498,6 +499,7 @@ void handleCommand(const char* line, Stream& io) {
     Serial.println("Rebooting to bootloader now!");
     delay(100);
     rp2040.rebootToBootloader();
+    Serial.printf("\r> ");
     return;
   }
 
@@ -505,18 +507,21 @@ void handleCommand(const char* line, Stream& io) {
     time_now = (millis() + 300);
     setstep();
     delay(300);
+    Serial.printf("\r> ");
     return;
   }
   if (!strcmp(line, "INCBAND") && fromUSB) {
     time_now = (millis() + 300);
     inc_preset();
     delay(300);
+    Serial.printf("\r> ");
     return;
   }
 
   if (!strcmp(line, "FREQ?") && fromUSB) {
     Serial.printf("RP2040Zero: tuned to: %u\n", freq);
     time_now = millis();
+    Serial.printf("\r> ");
     return;
   }
 
@@ -529,12 +534,14 @@ void handleCommand(const char* line, Stream& io) {
       }
     }
     time_now = millis();
+    Serial.printf("\r> ");
     return;
   }
 
   if (!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H") && fromUSB) {
     sendHelpRP();
     Serial.println();
+    Serial.printf("\r> ");
     return;
   }
 
@@ -548,18 +555,21 @@ void handleCommand(const char* line, Stream& io) {
       if ((unsigned long)val > 225000000UL) val = 225000000UL;
       freq = (unsigned long)val;
       time_now = millis();
+      Serial.printf("\r> ");
       return;
     } else if (!strcmp(key, "IF") && matched == 2 && fromUSB) {
       if (val < 0) val = 0;
       if (val > 200000) val = 200000;
       interfreq = val;
       time_now = millis();
+      Serial.printf("\r> ");
       return;
     } else if (!strcmp(key, "SIGMETER") && matched == 2 && fromUSB) {
       if (val < 1) val = 1;
       if (val > 14) val = 14;
       x = (byte)val;
       time_now = millis();
+      Serial.printf("\r> ");
       return;
     }
   }
@@ -567,6 +577,7 @@ void handleCommand(const char* line, Stream& io) {
   // Unknown command -> optionally report over USB and forward if from USB
   Serial.printf("RP2040Zero: Unknown cmd: ");
   Serial.println(line);
+  Serial.printf("\r> ");
 }
 
 void set_frequency(short dir) {
