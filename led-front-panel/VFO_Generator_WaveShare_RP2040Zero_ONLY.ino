@@ -8,18 +8,19 @@
 #include <string.h>
 
 // ==================== Defines ====================
-#define IF 10700           // Inter-Frequency in kHz
-#define BAND_INIT 18       // Initial band preset
-#define STEP_INIT 6        // Initial step size preset
-#define XT_CAL_F 0         // XTAL ppm drift calibration amount
-#define S_GAIN 505         // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
-#define SM_ADC A1          // Signal Meter ADC pin
-#define rotLeft 6          // Rotary-left pin
-#define rotRight 7         // Rotary-right pin
-#define LED_PIN 16         // WS2812 LED pin
-#define LED_COUNT 1        // The WaveShare RP2040 Zero only has the one LED
-#define WAIT_USB_SERIAL 0  // Wait for a client to connect to USB serial connsole
-#define BAUD 9600          // USB serial baud rate
+#define FW_VERSION "1.0.6"  // Our firmware version
+#define IF 10700            // Inter-Frequency in kHz
+#define BAND_INIT 18        // Initial band preset
+#define STEP_INIT 6         // Initial step size preset
+#define XT_CAL_F 0          // XTAL ppm drift calibration amount
+#define S_GAIN 505          // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
+#define SM_ADC A1           // Signal Meter ADC pin
+#define rotLeft 6           // Rotary-left pin
+#define rotRight 7          // Rotary-right pin
+#define LED_PIN 16          // WS2812 LED pin
+#define LED_COUNT 1         // The WaveShare RP2040 Zero only has the one LED
+#define WAIT_USB_SERIAL 0   // Wait for a client to connect to USB serial connsole
+#define BAUD 9600           // USB serial baud rate
 
 // ==================== Tuner variables ====================
 unsigned long freq, freqold, fstep;
@@ -206,7 +207,7 @@ static inline int32_t clampIfKHz(int32_t ifk) {
   return ifk;
 }
 static inline uint32_t clampScanDelay(uint32_t ms) {
-  if (ms < 20UL) return 20UL;
+  if (ms < 1UL) return 1UL;
   if (ms > 10000UL) return 10000UL;
   return ms;
 }
@@ -271,44 +272,44 @@ static void cfgFillFromGlobals(CfgV1& c) {
 }
 static bool cfgLoad() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (cfg): LittleFS mount failed\n> ");
+    Serial.println("\rRP2040Zero (cfg): LittleFS mount failed\n\r> ");
     return false;
   }
   if (!LittleFS.exists(CFG_PATH)) {
-    Serial.println("\rRP2040Zero (cfg): no config file, using defaults\n> ");
+    Serial.println("\rRP2040Zero (cfg): no config file, using defaults\n\r> ");
     return false;
   }
   File f = LittleFS.open(CFG_PATH, "r");
   if (!f) {
-    Serial.println("\rRP2040Zero (cfg): open failed\n> ");
+    Serial.println("\rRP2040Zero (cfg): open failed\n\r> ");
     return false;
   }
   CfgV1 c;
   size_t got = f.read((uint8_t*)&c, sizeof(c));
   f.close();
   if (got < offsetof(CfgV1, custom_list)) {
-    Serial.println("\rRP2040Zero (cfg): short read\n> ");
+    Serial.println("\rRP2040Zero (cfg): short read\n\r> ");
     return false;
   }
   if (c.magic != CFG_MAGIC || c.ver != CFG_VERSION) {
-    Serial.println("\rRP2040Zero (cfg): bad magic/version\n> ");
+    Serial.println("\rRP2040Zero (cfg): bad magic/version\n\r> ");
     return false;
   }
   cfgApply(c);
   sCfgLoaded = true;
-  Serial.println("\rRP2040Zero (cfg): loaded\n> ");
+  Serial.println("\rRP2040Zero (cfg): loaded");
   return true;
 }
 static bool cfgSaveNow() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (cfg): FS mount failed (save)\n> ");
+    Serial.println("\rRP2040Zero (cfg): FS mount failed (save)\n\r> ");
     return false;
   }
   CfgV1 c;
   cfgFillFromGlobals(c);
   File f = LittleFS.open(CFG_PATH, "w");
   if (!f) {
-    Serial.println("\rRP2040Zero (cfg): open for write failed\n> ");
+    Serial.println("\rRP2040Zero (cfg): open for write failed\n\r> ");
     return false;
   }
   size_t want = sizeof(c);
@@ -316,11 +317,11 @@ static bool cfgSaveNow() {
   f.flush();
   f.close();
   if (wr != want) {
-    Serial.println("\rRP2040Zero (cfg): short write\n> ");
+    Serial.println("\rRP2040Zero (cfg): short write\n\r> ");
     return false;
   }
   sCfgLastSave = millis();
-  Serial.println("\rRP2040Zero (cfg): saved\n> ");
+  Serial.print("\rRP2040Zero (cfg): saved\n\r> ");
   return true;
 }
 static void cfgMarkDirty() {
@@ -1043,43 +1044,6 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
 }
 
 // ==================== Command handlers ====================
-/*void sendHelpRP() {
-  Serial.println("RP2040Zero Help:");
-  Serial.println("General:");
-  Serial.println("  HELP | ? | H          - show this help");
-  Serial.println();
-  Serial.println("HW:");
-  Serial.println("  BOOTSEL               - reboot to UF2 bootloader");
-  Serial.println("  I2C?                  - scan I2C bus and print devices");
-  Serial.println();
-  Serial.println("Unimplemented HW buttons:");
-  Serial.println("  SETSTEP               - set rotary knob step count");
-  Serial.println("  INCBAND               - increment band preset");
-  Serial.println();
-  Serial.println("Tuning/state:");
-  Serial.println("  FREQ?                 - query current frequency");
-  Serial.println("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
-  Serial.println("  IF <kHz>              - set IF in kHz (0 .. 200000)");
-  Serial.println("  SIGMETER <1..14>      - set S-meter bucket");
-  Serial.println();
-  Serial.println("Scanning:");
-  Serial.println("  SCAN START            - start scanning current list");
-  Serial.println("  SCAN STOP             - stop scanning");
-  Serial.println("  SCAN?                 - show scanner status");
-  Serial.println("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
-  Serial.println("  SCAN SRC CUSTOM       - use custom list");
-  Serial.println("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
-  Serial.println("  SCAN ADD <Hz>         - add a frequency to custom list");
-  Serial.println("  SCAN CLEAR            - clear custom list");
-  Serial.println("  SCAN LIST?            - show current scan list");
-  Serial.println();
-  Serial.println("Console editing:");
-  Serial.println("  Enter (CR/LF)         - submit line");
-  Serial.println("  Backspace/Delete      - erase last character");
-  Serial.println("  Ctrl-U                - clear entire line");
-  Serial.println("  Ctrl-W                - delete previous word");
-  Serial.println("  Ctrl-C                - cancel current line");
-}*/
 static void sendHelpTo(Stream& out) {
   if (tuiEnabled) {
     // Optional: richer help that can write to any Stream or to TUI log
@@ -1204,11 +1168,18 @@ void handleCommand(const char* line, Stream& io) {
     else sPrintf(Serial, "%s", buf);
   };
 
-  // ==================== Boot to bootloader ====================
+  // ==================== Reboot to bootloader ====================
   if (!strcmp(line, "BOOTSEL") && fromUSB) {
-    outLine("Rebooting to bootloader now!");
+    outLine("Rebooting to bootloader now!\r");
     delay(100);
     rp2040.rebootToBootloader();
+    return;
+  }
+  // ==================== Reboot ====================
+  if (!strcmp(line, "REBOOT") && fromUSB) {
+    outLine("Rebooting now!\r");
+    delay(100);
+    rp2040.reboot();
     return;
   }
   // ==================== Factory reset ====================
@@ -1396,7 +1367,7 @@ void handleCommand(const char* line, Stream& io) {
     {
       unsigned long ms = 0;
       if (sscanf(line, "SCAN DELAY %lu", &ms) == 1) {
-        if (ms < 20) ms = 20;
+        if (ms < 1) ms = 1;
         if (ms > 10000UL) ms = 10000UL;
         uiScanDelayMs = (uint32_t)ms;
         cfgMarkDirty();  // persist stp/fstep
@@ -1553,7 +1524,7 @@ void setup() {
   } else {
     delay(3000);
   }
-  Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.5");
+  Serial.printf("\n\r\nRP2040Zero (boot): FW VER: %s\n\r", FW_VERSION);
   Serial.println("RP2040Zero (boot): Starting now..");
 
   // ==================== Rotary init ====================
@@ -1613,25 +1584,31 @@ void setup() {
   display.setCursor(0, 0);
   display.print("RP2040 I2C device(s):");
   display.setCursor(0, 12);
-  Serial.println("RP2040Zero (boot): Detected I2C device(s):");
+  Serial.print("RP2040Zero (boot): Detected I2C device(s):");
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
-      Serial.print("RP2040Zero (boot): Detected I2C device on bus: 0x");
-      Serial.println(addr, HEX);
+      if (addr == 1) {
+        Serial.print("0x");
+        Serial.print(addr, HEX);
+      } else {
+        Serial.print(", 0x");
+        Serial.print(addr, HEX);
+      }
       display.print("0x");
       display.print(addr, HEX);
       display.print(" ");
       display.display();
     }
   }
+  Serial.println();
 
   // ==================== Boot process finished ====================
   delay(750);
   strip.setBrightness(32);
   strip.setPixelColor(0, 64, 0, 32);
   strip.show();
-  Serial.print("RP2040Zero (boot): Running loop now..\n\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
+  Serial.print("RP2040Zero (boot): Running loop now..\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
 }
 // ==================== Loop ====================
 void loop() {
