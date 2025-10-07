@@ -141,7 +141,7 @@ inline void pollEncoder() {
   encPrev = curr;
 }
 
-// TUI
+// ==================== TUI section start ====================
 // ==================== Small printf helper for Streams ====================
 static void sPrintf(Stream& s, const char* fmt, ...) {
   char buf[256];
@@ -158,13 +158,29 @@ static bool tuiInAlt = false;      // in alternate screen
 static bool tuiDirtyFull = false;  // needs full redraw
 static bool tuiDirtyDyn = false;   // needs dynamic-only update
 static unsigned long tuiLastDraw = 0;
-static uint16_t tuiRows = 24;             // terminal rows (default)
-static uint16_t tuiCols = 80;             // terminal cols (default)
-static uint16_t tuiLogTop = 12;           // computed based on layout
-static uint16_t tuiLogBottom = (24 - 2);  // last row used by log pane (rows-2)
-static uint16_t tuiInputRow = 24;         // input row (bottom)
+static uint16_t tuiRows = 48;             // terminal rows (default)
+static uint16_t tuiCols = 200;            // terminal cols (default)
+static uint16_t tuiLogTop = 24;           // computed based on layout
+static uint16_t tuiLogBottom = (48 - 2);  // last row used by log pane (rows-2)
+static uint16_t tuiInputRow = 48;         // input row (bottom)
 // Disable echo in readLine so TUI can render the input itself
 static bool gTermNoEcho = false;
+// ==================== TUI layout utilities (right-side panel) ====================
+static uint16_t tuiPanelW = 44;       // width of right-side status panel
+static inline uint16_t tuiPanelX() {  // 1-based column where the panel starts
+  return (tuiCols > tuiPanelW) ? (tuiCols - tuiPanelW + 1) : 1;
+}
+static inline uint16_t tuiLogWidth() {  // width available to the left-side console
+  uint16_t px = tuiPanelX();
+  if (px <= 2) return tuiCols;  // no space for a gap -> use full width
+  return (uint16_t)(px - 2);    // keep 1-col gutter between log and panel
+}
+// Clear a rectangular region width 'w' starting at (row r, col c)
+static void clearRegion(Stream& s, uint16_t r, uint16_t c, uint16_t w) {
+  if (w == 0) return;
+  vtMove(s, r, c);
+  for (uint16_t i = 0; i < w; ++i) s.write(' ');
+}
 // Simple VT100 helpers
 static void vt(Stream& s, const char* seq) {
   if (tuiAnsi) s.print(seq);
@@ -184,11 +200,25 @@ static void vtHideCur(Stream& s) {
 static void vtShowCur(Stream& s) {
   if (tuiAnsi) s.print("\x1B[?25h");
 }
+static inline uint16_t clamp16(uint16_t v, uint16_t lo, uint16_t hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
 static void vtMove(Stream& s, uint16_t r, uint16_t c) {
   if (!tuiAnsi) return;
-  char buf[32];
-  snprintf(buf, sizeof(buf), "\x1B[%u;%uH", (unsigned)r, (unsigned)c);
-  s.print(buf);
+  if (tuiRows == 0 || tuiCols == 0) return;
+  r = clamp16(r, 1, tuiRows);
+  c = clamp16(c, 1, tuiCols);
+  char buf[24];
+  int n = snprintf(buf, sizeof(buf), "\x1B[%u;%uH", (unsigned)r, (unsigned)c);
+  s.write((const uint8_t*)buf, (size_t)n);
+}
+static void vtWrapOff(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[?7l");
+}
+static void vtWrapOn(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[?7h");
 }
 static void vtClrEol(Stream& s) {
   if (tuiAnsi) s.print("\x1B[K");
@@ -220,15 +250,15 @@ static void tuiLogf(const char* fmt, ...) {
   vsnprintf(tmp, sizeof(tmp), fmt, ap);
   va_end(ap);
 
-  // Visible width for wrapping (leave small margin)
-  const uint16_t visCols = (tuiCols >= 4) ? (tuiCols - 2) : tuiCols;
+  // Wrap to the visible console width on the left side (leave small margin for indent)
+  const uint16_t logCols = tuiLogWidth();
+  const uint16_t visCols = (logCols > 2) ? (logCols - 2) : logCols;
 
   const char* p = tmp;
   while (*p) {
-    const char* nl = strchr(p, '\n');  // FIX: pointer type
+    const char* nl = strchr(p, '\n');
     size_t segLen = nl ? (size_t)(nl - p) : strlen(p);
 
-    // wrap the segment to visible width
     size_t off = 0;
     while (off < segLen) {
       size_t take = segLen - off;
@@ -242,9 +272,9 @@ static void tuiLogf(const char* fmt, ...) {
       off += take;
     }
 
-    if (!nl) break;                   // no more newlines
-    if (segLen == 0) tuiLogLine("");  // preserve blank line on lone '\n'
-    p = nl + 1;                       // FIX: advance pointer correctly
+    if (!nl) break;
+    if (segLen == 0) tuiLogLine("");
+    p = nl + 1;
   }
 }
 // ========= TUI draw helpers =========
@@ -267,33 +297,43 @@ static const char* stepToStr() {
   }
 }
 static void drawHeader(Stream& s) {
-  vtMove(s, 1, 1);
+  const uint16_t px = tuiPanelX();
+  clearRegion(s, 1, px, tuiPanelW);
+  vtMove(s, 1, px);
   vtRevOn(s);
   char fbuf[32];
   formatFreqSmart(uiDisplayFreqHz(), fbuf, sizeof(fbuf));
-  sPrintf(s, " RP2040Zero VFO | FREQ: %s | %s | IF: %lu kHz | STEP: %s ",
-          fbuf, (sts ? "TX" : "RX"), (unsigned long)interfreq, stepToStr());
-  vtClrEol(s);
+  // Trim text if longer than panel width
+  char hdr[96];
+  snprintf(hdr, sizeof(hdr), " RP2040 VFO | %s | %s ", fbuf, (sts ? "TX" : "RX"));
+  size_t len = strlen(hdr);
+  if (len > tuiPanelW) hdr[tuiPanelW] = '\0';
+  s.print(hdr);
   vtRevOff(s);
 }
 static void drawScanRow(Stream& s) {
-  vtMove(s, 2, 1);
-  // Build a simple progress bar-ish indicator
+  const uint16_t px = tuiPanelX();
+  clearRegion(s, 2, px, tuiPanelW);
+  vtMove(s, 2, px);
   const size_t len = uiCurrentListLen();
   size_t idx = uiScanIdx;
   if (idx >= len && len > 0) idx = len - 1;
-  sPrintf(s, " Scan: %s | Source: %s | Delay: %lu ms | Len: %lu | Index: %lu ",
-          uiScanOn ? "ON" : "OFF",
-          uiScanSrc ? "CUSTOM" : "HARD",
-          (unsigned long)uiScanDelayMs,
-          (unsigned long)len,
-          (unsigned long)idx);
-  vtClrEol(s);
+  char line[128];
+  snprintf(line, sizeof(line), " Scan:%s Src:%s Len:%lu Idx:%lu ",
+           uiScanOn ? "ON" : "OFF",
+           uiScanSrc ? "CUSTOM" : "HARD",
+           (unsigned long)len,
+           (unsigned long)idx);
+  // Trim
+  if (strlen(line) > tuiPanelW) line[tuiPanelW] = '\0';
+  s.print(line);
 }
 static void drawFreqBlock(Stream& s) {
-  // Large-ish frequency line
-  vtMove(s, 4, 2);
-  char fbuf[64];
+  const uint16_t px = tuiPanelX();
+
+  // Big frequency line at row 4
+  clearRegion(s, 4, px, tuiPanelW);
+  vtMove(s, 4, px);
   unsigned long df = uiDisplayFreqHz();
   unsigned int m = df / 1000000UL;
   unsigned int k = (df % 1000000UL) / 1000UL;
@@ -308,12 +348,17 @@ static void drawFreqBlock(Stream& s) {
     snprintf(big, sizeof(big), "%2u.%03u.%02u MHz", m, k, h2);
   }
   vtRevOn(s);
-  sPrintf(s, " %s ", big);
+  // Trim
+  char out[64];
+  snprintf(out, sizeof(out), " %s ", big);
+  if (strlen(out) > tuiPanelW) out[tuiPanelW] = '\0';
+  s.print(out);
   vtRevOff(s);
-  vtClrEol(s);
 
-  vtMove(s, 6, 2);
-  sPrintf(s, "Band: ");
+  // Band at row 6
+  clearRegion(s, 6, px, tuiPanelW);
+  vtMove(s, 6, px);
+  s.print("Band: ");
   switch (count) {
     case 1: s.print("GEN"); break;
     case 2: s.print("MW"); break;
@@ -338,51 +383,67 @@ static void drawFreqBlock(Stream& s) {
     case 21: s.print("1m"); break;
     default: s.print("?"); break;
   }
-  vtClrEol(s);
+
+  // IF and STEP lines (rows 7 and 8) for quick glance
+  clearRegion(s, 7, px, tuiPanelW);
+  vtMove(s, 7, px);
+  sPrintf(s, "IF: %lu kHz  STEP: %s", (unsigned long)interfreq, stepToStr());
 }
 static void drawBars(Stream& s) {
+  const uint16_t px = tuiPanelX();
   // TU bar (n mapped 1..42 -> 1..14)
   byte tu = map(n, 1, 42, 1, 14);
-  vtMove(s, 8, 2);
+  clearRegion(s, 9, px, tuiPanelW);
+  vtMove(s, 9, px);
   s.print("TU ");
   for (int i = 1; i <= 14; ++i) s.print(i <= tu ? '|' : '.');
-  vtClrEol(s);
+
   // SM bar (x 1..14)
-  vtMove(s, 9, 2);
+  clearRegion(s, 10, px, tuiPanelW);
+  vtMove(s, 10, px);
   s.print("SM ");
   for (int i = 1; i <= 14; ++i) s.print(i <= x ? '|' : '.');
-  vtClrEol(s);
 }
 static void drawLog(Stream& s) {
-  // Frame for log
-  vtMove(s, tuiLogTop - 1, 1);
-  vtClrEol(s);
-  s.print(" Console:");
-  vtClrEol(s);
-  // Lines visible
+  const uint16_t logW = tuiLogWidth();
+
+  // "Console:" label one row above the log
+  if (tuiLogTop > 1) {
+    clearRegion(s, tuiLogTop - 1, 1, logW);
+    vtMove(s, tuiLogTop - 1, 1);
+    s.print("Console:");
+  }
+
+  // Determine which lines to show (tail of ring buffer)
   const uint16_t visRows = (tuiLogBottom >= tuiLogTop) ? (tuiLogBottom - tuiLogTop + 1) : 0;
-  size_t start = (tuiLogCount > visRows) ? (tuiLogHead + TUI_LOG_MAX + (tuiLogCount - visRows)) % TUI_LOG_MAX
-                                         : (tuiLogHead + TUI_LOG_MAX - tuiLogCount) % TUI_LOG_MAX;
+  size_t oldest = (tuiLogHead + TUI_LOG_MAX - tuiLogCount) % TUI_LOG_MAX;
+  size_t start = (tuiLogCount > visRows)
+                   ? (oldest + (tuiLogCount - visRows)) % TUI_LOG_MAX
+                   : oldest;
+
   for (uint16_t r = 0; r < visRows; ++r) {
     size_t idx = (start + r) % TUI_LOG_MAX;
-    vtMove(s, tuiLogTop + r, 1);
-    vtClrEol(s);
+    clearRegion(s, tuiLogTop + r, 1, logW);
     if (r < tuiLogCount) {
-      // indent two spaces
-      s.print(" ");
-      s.print(tuiLog[idx]);
+      vtMove(s, tuiLogTop + r, 1);
+      s.write(' ');  // small indent
+      // Draw clipped line if necessary
+      const char* line = tuiLog[idx];
+      size_t len = strlen(line);
+      if (len > (logW - 2)) len = (logW - 2);
+      for (size_t i = 0; i < len; ++i) s.write((uint8_t)line[i]);
     }
   }
 }
 static void drawInput(Stream& s) {
+  const uint16_t logW = tuiLogWidth();
+  clearRegion(s, tuiInputRow, 1, logW);
   vtMove(s, tuiInputRow, 1);
-  vtClrEol(s);
   s.print("> ");
-  // mirror current input buffer
   size_t showLen = sUsbLen;
-  if (showLen > (tuiCols - 3)) showLen = tuiCols - 3;
+  if (showLen > (logW - 3)) showLen = (logW - 3);
   for (size_t i = 0; i < showLen; ++i) s.write((uint8_t)sUsbBuf[i]);
-  // put cursor at end
+  // Put cursor at end of input
   vtMove(s, tuiInputRow, 3 + showLen);
 }
 static void tuiEnter() {
@@ -414,46 +475,110 @@ static void tuiSetEnabled(bool on) {
 }
 static void tuiRedrawFull() {
   if (!tuiEnabled) return;
+  vtHideCur(Serial);
   vtClear(Serial);
   drawHeader(Serial);
   drawScanRow(Serial);
   drawFreqBlock(Serial);
   drawBars(Serial);
   drawLog(Serial);
-  drawInput(Serial);
+  drawInput(Serial);  // sets caret position
   vtShowCur(Serial);
   tuiDirtyFull = false;
   tuiDirtyDyn = false;
 }
 static void tuiRedrawDynamic() {
   if (!tuiEnabled) return;
+  vtHideCur(Serial);
+  // No vtClear here; dynamic should be partial updates only
   drawHeader(Serial);
   drawScanRow(Serial);
   drawFreqBlock(Serial);
   drawBars(Serial);
   drawLog(Serial);
-  drawInput(Serial);
+  drawInput(Serial);  // sets caret position
   vtShowCur(Serial);
   tuiDirtyDyn = false;
+}
+enum {
+  TUI_DIRTY_NONE = 0,
+  TUI_DIRTY_HEADER = 1 << 0,
+  TUI_DIRTY_SCAN = 1 << 1,
+  TUI_DIRTY_FREQ = 1 << 2,
+  TUI_DIRTY_BARS = 1 << 3,
+  TUI_DIRTY_LOG = 1 << 4,
+  TUI_DIRTY_INPUT = 1 << 5,
+  TUI_DIRTY_FULL = 1 << 15
+};
+static uint16_t tuiDirtyMask = 0;
+static inline void tuiDirtySet(uint16_t m) {
+  tuiDirtyMask |= m;
+}
+static inline void tuiDirtyClear(uint16_t m) {
+  tuiDirtyMask &= ~m;
+}
+static void tuiRedrawDirty() {
+  if (!tuiEnabled || tuiDirtyMask == 0) return;
+  vtHideCur(Serial);
+
+  if (tuiDirtyMask & TUI_DIRTY_FULL) {
+    vtClear(Serial);
+    drawHeader(Serial);
+    drawScanRow(Serial);
+    drawFreqBlock(Serial);
+    drawBars(Serial);
+    drawLog(Serial);
+    drawInput(Serial);
+    tuiDirtyMask = 0;
+    vtShowCur(Serial);
+    return;
+  }
+
+  if (tuiDirtyMask & TUI_DIRTY_HEADER) {
+    drawHeader(Serial);
+    tuiDirtyClear(TUI_DIRTY_HEADER);
+  }
+  if (tuiDirtyMask & TUI_DIRTY_SCAN) {
+    drawScanRow(Serial);
+    tuiDirtyClear(TUI_DIRTY_SCAN);
+  }
+  if (tuiDirtyMask & TUI_DIRTY_FREQ) {
+    drawFreqBlock(Serial);
+    tuiDirtyClear(TUI_DIRTY_FREQ);
+  }
+  if (tuiDirtyMask & TUI_DIRTY_BARS) {
+    drawBars(Serial);
+    tuiDirtyClear(TUI_DIRTY_BARS);
+  }
+  if (tuiDirtyMask & TUI_DIRTY_LOG) {
+    drawLog(Serial);
+    tuiDirtyClear(TUI_DIRTY_LOG);
+  }
+  if (tuiDirtyMask & TUI_DIRTY_INPUT) {
+    drawInput(Serial);
+    tuiDirtyClear(TUI_DIRTY_INPUT);
+  }
+
+  vtShowCur(Serial);
 }
 static void tuiMarkDirty() {
   tuiDirtyDyn = true;
 }
 static void tuiTick() {
   if (!tuiEnabled) return;
-  const unsigned long now = millis();
-  const unsigned long period = 150;
+
   if (tuiDirtyFull) {
     tuiRedrawFull();
-    tuiLastDraw = now;
     return;
   }
-  if ((now - tuiLastDraw) >= period || tuiDirtyDyn) {
-    tuiRedrawDynamic();
-    tuiLastDraw = now;
-  }
-}
 
+  if (tuiDirtyDyn) {
+    tuiRedrawDynamic();
+    return;
+  }
+
+  // Nothing to update: do not touch the terminal at all.
+}
 // ==================== Improved terminal line reader (echo-aware) ====================
 static inline bool isPrintableAscii(char c) {
   return c >= 0x20 && c <= 0x7E;
@@ -468,6 +593,7 @@ static void termEraseChars(Stream& s, size_t n) {
 bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   while (s.available()) {
     char c = (char)s.read();
+
     if (c == '\n' || c == '\r') {
       if (c == '\r' && s.peek() == '\n') (void)s.read();
       size_t useLen = inoutLen;
@@ -478,22 +604,28 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
         s.write('\n');
       }
       inoutLen = 0;
+      if (tuiEnabled) tuiMarkDirty();
       return true;
     }
-    if (c == 0x08 || c == 0x7F) {
+
+    if (c == 0x08 || c == 0x7F) {  // backspace/delete
       if (inoutLen > 0) {
         inoutLen--;
         if (!gTermNoEcho) termEraseChars(s, 1);
+        if (tuiEnabled) tuiMarkDirty();
       } else {
         if (!gTermNoEcho) s.write('\a');
       }
       continue;
     }
+
     if (c == 0x15) {  // Ctrl-U
       if (!gTermNoEcho && inoutLen > 0) termEraseChars(s, inoutLen);
       inoutLen = 0;
+      if (tuiEnabled) tuiMarkDirty();
       continue;
     }
+
     if (c == 0x17) {  // Ctrl-W
       if (inoutLen > 0) {
         size_t i = inoutLen;
@@ -502,9 +634,11 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
         size_t toErase = inoutLen - i;
         inoutLen = i;
         if (!gTermNoEcho && toErase > 0) termEraseChars(s, toErase);
+        if (tuiEnabled) tuiMarkDirty();
       }
       continue;
     }
+
     if (c == 0x03) {  // Ctrl-C
       if (!gTermNoEcho) {
         s.write('^');
@@ -514,13 +648,16 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
       }
       outBuf[0] = '\0';
       inoutLen = 0;
+      if (tuiEnabled) tuiMarkDirty();
       return true;
     }
+
     if (c == '\t') c = ' ';
     if (isPrintableAscii(c)) {
       if (inoutLen < (outSz - 1)) {
         outBuf[inoutLen++] = c;
         if (!gTermNoEcho) s.write((uint8_t)c);
+        if (tuiEnabled) tuiMarkDirty();
       } else {
         if (!gTermNoEcho) s.write('\a');
       }
@@ -528,115 +665,7 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   }
   return false;
 }
-
-// ==================== Improved terminal line reader ====================
-/*static inline bool isPrintableAscii(char c) {
-  return c >= 0x20 && c <= 0x7E;
-}
-static void termEraseChars(Stream& s, size_t n) {
-  // Erase n characters on terminal by backspacing over them
-  for (size_t i = 0; i < n; ++i) {
-    s.write('\b');
-    s.write(' ');
-    s.write('\b');
-  }
-}
-bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
-  // - Echo-back typed characters
-  // - Backspace/Delete support (erase from screen)
-  // - CR, LF, or CRLF line endings
-  // - Ctrl-U: clear entire line
-  // - Ctrl-W: delete previous word
-  // - Ctrl-C: cancel current line (returns empty line to caller)
-  while (s.available()) {
-    char c = (char)s.read();
-
-    // Newline: accept CR or LF
-    if (c == '\n' || c == '\r') {
-      // Swallow a possible CRLF second half without generating an empty line next time
-      if (c == '\r' && s.peek() == '\n') (void)s.read();
-
-      // Null-terminate
-      size_t useLen = inoutLen;
-      if (useLen >= outSz) useLen = outSz - 1;
-      outBuf[useLen] = '\0';
-
-      // Echo canonical newline for terminal
-      s.write('\r');
-      s.write('\n');
-
-      // Reset for next line and signal a complete line to caller
-      inoutLen = 0;
-      return true;
-    }
-
-    // Handle backspace/delete
-    if (c == 0x08 || c == 0x7F) {
-      if (inoutLen > 0) {
-        inoutLen--;
-        termEraseChars(s, 1);
-      } else {
-        // nothing to delete, optional bell
-        s.write('\a');
-      }
-      continue;
-    }
-
-    // Ctrl-U: clear entire line
-    if (c == 0x15) {
-      if (inoutLen > 0) {
-        termEraseChars(s, inoutLen);
-        inoutLen = 0;
-      }
-      continue;
-    }
-
-    // Ctrl-W: delete previous word
-    if (c == 0x17) {
-      if (inoutLen > 0) {
-        // find word start (skip any trailing spaces)
-        size_t i = inoutLen;
-        while (i > 0 && outBuf[i - 1] == ' ') i--;
-        while (i > 0 && outBuf[i - 1] != ' ') i--;
-        size_t toErase = inoutLen - i;
-        if (toErase > 0) {
-          inoutLen = i;
-          termEraseChars(s, toErase);
-        }
-      }
-      continue;
-    }
-
-    // Ctrl-C: cancel current line (like a shell)
-    if (c == 0x03) {
-      // Echo ^C and newline
-      s.write('^');
-      s.write('C');
-      s.write('\r');
-      s.write('\n');
-      // Deliver empty line to caller (who ignores it)
-      outBuf[0] = '\0';
-      inoutLen = 0;
-      return true;
-    }
-
-    // Convert TAB to single space (minimal handling)
-    if (c == '\t') c = ' ';
-
-    // Printable ASCII: append if room
-    if (isPrintableAscii(c)) {
-      if (inoutLen < (outSz - 1)) {
-        outBuf[inoutLen++] = c;
-        s.write((uint8_t)c);  // echo
-      } else {
-        // Buffer full: optional bell to indicate overflow
-        s.write('\a');
-      }
-    }
-    // All other control chars ignored
-  }
-  return false;
-}*/
+// ==================== TUI section end ====================
 
 // ==================== Boot Animations ====================
 static inline float easeOutCubic(float t) {
@@ -858,49 +887,44 @@ void sendHelpRP() {
 }
 // Optional: richer help that can write to any Stream or to TUI log
 static void sendHelpTo(Stream& out) {
-  out.println("RP2040Zero Help:");
-  out.println("General:");
-  out.println("  HELP | ? | H          - show this help");
+  out.print("RP2040Zero Help:");
+  out.print("General:");
+  out.print("  HELP | ? | H          - show this help");
+  out.print("HW:");
+  out.print("  BOOTSEL               - reboot to UF2 bootloader");
+  out.print("  I2C?                  - scan I2C bus and print devices");
+  out.print("Unimplemented HW buttons:");
+  out.print("  SETSTEP               - set rotary knob step count");
+  out.print("  INCBAND               - increment band preset");
+  out.print("Tuning/state:");
+  out.print("  FREQ?                 - query current frequency");
+  out.print("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
+  out.print("  IF <kHz>              - set IF in kHz (0 .. 200000)");
+  out.print("  SIGMETER <1..14>      - set S-meter bucket");
+  out.print("Scanning:");
+  out.print("  SCAN START            - start scanning current list");
+  out.print("  SCAN STOP             - stop scanning");
+  out.print("  SCAN?                 - show scanner status");
+  out.print("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
+  out.print("  SCAN SRC CUSTOM       - use custom list");
+  out.print("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
+  out.print("  SCAN ADD <Hz>         - add a frequency to custom list");
+  out.print("  SCAN CLEAR            - clear custom list");
+  out.print("  SCAN LIST?            - show current scan list");
+  out.print("Terminal UI:");
+  out.print("  TTY ON                - enable terminal UI (ANSI/VT100)");
+  out.print("  TTY OFF               - disable terminal UI");
+  out.print("  TTY?                  - show TTY status");
+  out.print("  TTY ANSI ON|OFF       - enable/disable ANSI usage");
+  out.print("  TTY REDRAW            - force full redraw");
+  out.print("  TTY SIZE <rows> <cols>- set terminal rows/cols (for layout)");
+  out.print("Console editing:");
+  out.print("  Enter (CR/LF)         - submit line");
+  out.print("  Backspace/Delete      - erase last character");
+  out.print("  Ctrl-U                - clear entire line");
+  out.print("  Ctrl-W                - delete previous word");
+  out.print("  Ctrl-C                - cancel current line");
   out.println();
-  out.println("HW:");
-  out.println("  BOOTSEL               - reboot to UF2 bootloader");
-  out.println("  I2C?                  - scan I2C bus and print devices");
-  out.println();
-  out.println("Unimplemented HW buttons:");
-  out.println("  SETSTEP               - set rotary knob step count");
-  out.println("  INCBAND               - increment band preset");
-  out.println();
-  out.println("Tuning/state:");
-  out.println("  FREQ?                 - query current frequency");
-  out.println("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
-  out.println("  IF <kHz>              - set IF in kHz (0 .. 200000)");
-  out.println("  SIGMETER <1..14>      - set S-meter bucket");
-  out.println();
-  out.println("Scanning:");
-  out.println("  SCAN START            - start scanning current list");
-  out.println("  SCAN STOP             - stop scanning");
-  out.println("  SCAN?                 - show scanner status");
-  out.println("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
-  out.println("  SCAN SRC CUSTOM       - use custom list");
-  out.println("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
-  out.println("  SCAN ADD <Hz>         - add a frequency to custom list");
-  out.println("  SCAN CLEAR            - clear custom list");
-  out.println("  SCAN LIST?            - show current scan list");
-  out.println();
-  out.println("Terminal UI:");
-  out.println("  TTY ON                - enable terminal UI (ANSI/VT100)");
-  out.println("  TTY OFF               - disable terminal UI");
-  out.println("  TTY?                  - show TTY status");
-  out.println("  TTY ANSI ON|OFF       - enable/disable ANSI usage");
-  out.println("  TTY REDRAW            - force full redraw");
-  out.println("  TTY SIZE <rows> <cols>- set terminal rows/cols (for layout)");
-  out.println();
-  out.println("Console editing:");
-  out.println("  Enter (CR/LF)         - submit line");
-  out.println("  Backspace/Delete      - erase last character");
-  out.println("  Ctrl-U                - clear entire line");
-  out.println("  Ctrl-W                - delete previous word");
-  out.println("  Ctrl-C                - cancel current line");
 }
 // Existing sendHelpRP can remain; we’ll prefer sendHelpTo so help appears inside TUI log when active.
 static void sendScanStatus(Stream& io) {
@@ -920,6 +944,12 @@ static void termPrompt() {
 }
 void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;
+
+  // Echo typed command into TUI log so it's always visible in the console pane
+  if (tuiEnabled) {
+    tuiLogf("> %s\n", line);
+  }
+
   const bool fromUSB = (&io == &Serial);
 
   // When TUI is ON, route printed outputs to the log instead of raw terminal
@@ -1205,7 +1235,8 @@ void handleCommand(const char* line, Stream& io) {
     } else {
       sendHelpTo(Serial);
     }
-    Serial.println();
+    //Serial.println();
+    if (!tuiEnabled) Serial.println();
     termPrompt();
     tuiMarkDirty();
     return;
@@ -1251,208 +1282,6 @@ void handleCommand(const char* line, Stream& io) {
   }
   tuiMarkDirty();
 }
-/*void handleCommand(const char* line, Stream& io) {
-  if (line[0] == '\0') return;  // Return if termination is first-in char
-
-  const bool fromUSB = (&io == &Serial);  // Is our IO stream is from the USB serial
-
-  // ==================== Boot to bootloader ====================
-  if (!strcmp(line, "BOOTSEL") && fromUSB) {
-    Serial.println("Rebooting to bootloader now!");
-    Serial.printf("\r> ");
-    delay(100);
-    rp2040.rebootToBootloader();
-    return;
-  }
-
-  // ==================== Cycle to next step size preset ====================
-  if (!strcmp(line, "SETSTEP") && fromUSB) {
-    time_now = (millis() + 300);
-    setstep();
-    delay(300);
-    Serial.printf("\r> ");
-    return;
-  }
-
-  // ==================== Cycle to next band preset ====================
-  if (!strcmp(line, "INCBAND") && fromUSB) {
-    time_now = (millis() + 300);
-    inc_preset();
-    delay(300);
-    Serial.printf("\r> ");
-    return;
-  }
-
-  // ==================== Return the current frequency ====================
-  if (!strcmp(line, "FREQ?") && fromUSB) {
-    char buf[32];
-    formatFreqSmart(freq, buf, sizeof(buf));
-    Serial.printf("RP2040Zero: tuned to: %lu Hz (%s)\n", (unsigned long)freq, buf);
-    time_now = millis();
-    Serial.printf("\r> ");
-    return;
-  }
-
-  // ==================== I2C device scanner ====================
-  if (!strcmp(line, "I2C?") && fromUSB) {
-    for (uint8_t addr = 1; addr < 127; addr++) {
-      Wire.beginTransmission(addr);
-      if (Wire.endTransmission() == 0) {
-        Serial.print("RP2040Zero (boot): Detected I2C device on bus: 0x");
-        Serial.println(addr, HEX);
-      }
-    }
-    time_now = millis();
-    Serial.printf("\r> ");
-    return;
-  }
-
-  // ==================== Scanner commands ====================
-  if (fromUSB) {
-    // ==================== SCAN? ====================
-    if (!strcmp(line, "SCAN?")) {
-      sendScanStatus();
-      Serial.printf("\r> ");
-      return;
-    }
-    // ==================== SCAN START ====================
-    if (!strcmp(line, "SCAN START")) {
-      if (uiCurrentListLen() == 0) {
-        Serial.println("Scan: no entries in current list");
-      } else {
-        uiScanStart();
-        Serial.println("Scan: started");
-      }
-      Serial.printf("\r> ");
-      return;
-    }
-    // ==================== SCAN STOP ====================
-    if (!strcmp(line, "SCAN STOP")) {
-      uiScanStop();
-      Serial.println("Scan: stopped");
-      Serial.printf("\r> ");
-      return;
-    }
-    // ==================== SCAN SRC HARD ====================
-    if (!strcmp(line, "SCAN SRC HARD")) {
-      uiScanUse(0);
-      Serial.println("Scan: source = HARD");
-      Serial.printf("\r> ");
-      return;
-    }
-    // ==================== SCAN SRC CUSTOM ====================
-    if (!strcmp(line, "SCAN SRC CUSTOM")) {
-      if (uiCustomScanLen == 0) {
-        Serial.println("Scan: CUSTOM list empty (use: SCAN ADD <Hz>)");
-      } else {
-        uiScanUse(1);
-        Serial.println("Scan: source = CUSTOM");
-      }
-      Serial.printf("\r> ");
-      return;
-    }
-    // ==================== SCAN DELAY <ms> ====================
-    {
-      unsigned long ms = 0;
-      if (sscanf(line, "SCAN DELAY %lu", &ms) == 1) {
-        if (ms < 20) ms = 20;
-        if (ms > 10000UL) ms = 10000UL;
-        uiScanDelayMs = (uint32_t)ms;
-        Serial.printf("Scan: delay = %lu ms\n", (unsigned long)uiScanDelayMs);
-        Serial.printf("\r> ");
-        return;
-      }
-    }
-    // ==================== SCAN ADD <Hz> ====================
-    {
-      unsigned long hz = 0;
-      if (sscanf(line, "SCAN ADD %lu", &hz) == 1) {
-        if (hz < 10000UL) hz = 10000UL;
-        if (hz > 225000000UL) hz = 225000000UL;
-        if (uiCustomScanLen >= UI_MAX_CUSTOM_SCAN) {
-          Serial.printf("Scan: custom list full (%lu max)\n", (unsigned long)UI_MAX_CUSTOM_SCAN);
-        } else {
-          uiCustomScanList[uiCustomScanLen++] = (uint32_t)hz;
-          char buf[32];
-          formatFreqSmart((uint32_t)hz, buf, sizeof(buf));
-          Serial.printf("Scan: added %lu Hz (%s), custom len=%lu\n",
-                        (unsigned long)hz, buf, (unsigned long)uiCustomScanLen);
-        }
-        Serial.printf("\r> ");
-        return;
-      }
-    }
-    // ==================== SCAN CLEAR ====================
-    if (!strcmp(line, "SCAN CLEAR")) {
-      uiCustomScanLen = 0;
-      if (uiScanSrc == 1) {
-        uiScanStop();
-        uiScanUse(0);  // fall back to HARD if custom emptied
-      }
-      Serial.println("Scan: custom list cleared");
-      Serial.printf("\r> ");
-      return;
-    }
-    // ==================== SCAN LIST? ====================
-    if (!strcmp(line, "SCAN LIST?")) {
-      const uint32_t* list = uiCurrentListPtr();
-      const size_t len = uiCurrentListLen();
-      Serial.printf("Scan list (%s), len=%lu\n", uiScanSrc ? "CUSTOM" : "HARD", (unsigned long)len);
-      for (size_t i = 0; i < len; ++i) {
-        char buf[32];
-        formatFreqSmart(list[i], buf, sizeof(buf));
-        Serial.printf("  [%lu] %lu Hz (%s)\n", (unsigned long)i, (unsigned long)list[i], buf);
-      }
-      Serial.printf("\r> ");
-      return;
-    }
-  }
-
-  // ==================== Return help dialog ====================
-  if ((!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H")) && fromUSB) {
-    sendHelpRP();
-    Serial.println();
-    Serial.printf("\r> ");
-    return;
-  }
-
-  // ==================== Handler for KEY [VALUE] numeric ====================
-  char key[8] = { 0 };
-  long val = 0;
-  int matched = sscanf(line, "%7s %ld", key, &val);
-  if (matched >= 1 && fromUSB) {
-    if (!strcmp(key, "FREQ") && matched == 2 && fromUSB) {
-      // ==================== Set a frequency in Hertz ====================
-      if (val < 10000) val = 10000;
-      if ((unsigned long)val > 225000000UL) val = 225000000UL;
-      freq = (unsigned long)val;
-      time_now = millis();
-      Serial.printf("\r> ");
-      return;
-    } else if (!strcmp(key, "IF") && matched == 2 && fromUSB) {
-      // ==================== Set an inter-frequency in kHz ====================
-      if (val < 0) val = 0;
-      if (val > 200000) val = 200000;
-      interfreq = val;
-      time_now = millis();
-      Serial.printf("\r> ");
-      return;
-    } else if (!strcmp(key, "SIGMETER") && matched == 2 && fromUSB) {
-      // ==================== Set the signal meter value ====================
-      if (val < 1) val = 1;
-      if (val > 14) val = 14;
-      x = (byte)val;
-      time_now = millis();
-      Serial.printf("\r> ");
-      return;
-    }
-  }
-
-  // ==================== Unknown command ====================
-  Serial.printf("RP2040Zero: Unknown cmd: ");
-  Serial.println(line);
-  Serial.printf("\r> ");
-}*/
 
 // ==================== Setup ====================
 void setup() {
