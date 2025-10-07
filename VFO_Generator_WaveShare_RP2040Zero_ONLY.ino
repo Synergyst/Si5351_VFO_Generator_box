@@ -4,16 +4,7 @@
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
 
-#define LED_PIN 16
-#define LED_COUNT 1
-#define IS_RGBW true
-#if IS_RGBW
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
-#else
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
-#endif
-
-//------------------------------------------------------------------------------------------------------------
+// ==================== Defines ====================
 #define IF 10700  // IF in kHz
 #define BAND_INIT 18
 #define XT_CAL_F 0
@@ -23,6 +14,10 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define rotLeft 6   // The pin used by rotary-left input.
 #define rotRight 7  // The pin used by rotary-right input.
 
+#define LED_PIN 16  // WS2812 LED
+#define LED_COUNT 1
+
+// ==================== Tuner variables ====================
 unsigned long freq, freqold, fstep;
 long interfreq = IF, interfreqold = 0;
 static long lastSentIF = -1;
@@ -35,11 +30,14 @@ bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
 
+// ==================== I2C devices ====================
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
-
 Si5351 si5351(0x60);
 
-// Encoder state
+// ==================== WS2812 LED ====================
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
+
+// ==================== Encoder state ====================
 static uint8_t encPrev = 0;
 static int8_t encAccum = 0;
 static const int8_t encTable[16] = {
@@ -49,12 +47,12 @@ static const int8_t encTable[16] = {
   0, +1, -1, 0
 };
 
-// --------- Line Reader (newline-terminated) ----------
+// ==================== Line Reader ====================-
 static const size_t CMD_BUF_SZ = 255;
 static char sUsbBuf[CMD_BUF_SZ];
 static size_t sUsbLen = 0;
 
-// UI scanner gate
+// ==================== UI scanner ====================
 static bool uiScanOn = false;
 static uint8_t uiScanSrc = 0;          // 0 = hard list, 1 = custom list
 static uint32_t uiScanDelayMs = 5000;  // per-step delay (ms)
@@ -62,7 +60,6 @@ static uint32_t uiScanLastMs = 0;
 static size_t uiScanIdx = 0;
 static uint32_t uiScanCurrFreqHz = 0;
 static bool uiScanPending = false;
-
 static const uint32_t uiHardScanList[] PROGMEM = {
   96300000UL,   // 96.3 MHz -
   102500000UL,  // 102.5 MHz -
@@ -73,12 +70,11 @@ static const uint32_t uiHardScanList[] PROGMEM = {
   162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
 static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);
-
 static const size_t UI_MAX_CUSTOM_SCAN = 255;
 static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];
 static size_t uiCustomScanLen = 0;
 
-//==================== Rotary Encoder ====================
+// ==================== Rotary Encoder ====================
 inline void pollEncoder() {
   uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
   uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
@@ -100,7 +96,7 @@ inline void pollEncoder() {
   encPrev = curr;
 }
 
-//==================== Improved terminal line reader ====================
+// ==================== Improved terminal line reader ====================
 // - Echo-back typed characters
 // - Backspace/Delete support (erase from screen)
 // - CR, LF, or CRLF line endings
@@ -209,10 +205,10 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   return false;
 }
 
+// ==================== Boot Animations ====================
 static inline float easeOutCubic(float t) {
   return 1.0f - powf(1.0f - t, 3.0f);
 }
-
 static void drawBitmapScaled1(Adafruit_SSD1306& d,
                               const uint8_t* buf, int bw, int bh,
                               int cx, int cy, float sx, float sy) {
@@ -247,7 +243,6 @@ static void drawBitmapScaled1(Adafruit_SSD1306& d,
     }
   }
 }
-
 void animateTextToCenterAndCompress(Adafruit_SSD1306& d,
                                     const char* text,
                                     int startX, int startY,
@@ -306,11 +301,9 @@ void animateTextToCenterAndCompress(Adafruit_SSD1306& d,
     }
   }
 }
-
 inline void bootExplosion(Adafruit_SSD1306& d) {
   bootExplosion(d, 350);
 }
-
 void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs) {
   const int W = d.width();
   const int H = d.height();
@@ -395,7 +388,7 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs) {
   }
 }
 
-// --------- Command handlers ----------
+// ==================== Command handlers ====================
 void sendHelpRP() {
   Serial.println("RP2040Zero Help:");
   Serial.println("General:");
@@ -422,73 +415,6 @@ void sendHelpRP() {
   Serial.println("  Ctrl-W                - delete previous word");
   Serial.println("  Ctrl-C                - cancel current line");
 }
-
-/* ====================== UI Scanner Mirror (display-only) ====================== */
-static inline size_t uiCurrentListLen() {
-  return uiScanSrc ? uiCustomScanLen : uiHardScanLen;
-}
-static inline const uint32_t* uiCurrentListPtr() {
-  return uiScanSrc ? uiCustomScanList : uiHardScanList;
-}
-static inline void uiScanUse(uint8_t src) {
-  uiScanSrc = src ? 1 : 0;
-}
-static void uiScanStart() {
-  if (uiCurrentListLen() == 0) return;
-  uiScanOn = true;
-  uiScanIdx = 0;
-  uiScanLastMs = millis() - uiScanDelayMs;
-}
-static void uiScanStop() {
-  uiScanOn = false;
-  uiScanPending = false;
-}
-static void uiScanTick() {
-  if (!uiScanOn) return;
-  if (sts) return;
-
-  size_t len = uiCurrentListLen();
-  if (len == 0) {
-    uiScanOn = false;
-    return;
-  }
-  uint32_t now = millis();
-  if ((now - uiScanLastMs) >= uiScanDelayMs) {
-    uiScanLastMs = now;
-    const uint32_t* list = uiCurrentListPtr();
-    uiScanCurrFreqHz = list[uiScanIdx];
-    freq = uiScanCurrFreqHz;
-    uiScanIdx = (uiScanIdx + 1) % len;
-  }
-}
-static inline unsigned long uiDisplayFreqHz() {
-  if (uiScanOn) {
-    if (uiScanCurrFreqHz != 0) return uiScanCurrFreqHz;
-    if (uiCurrentListLen() > 0) return uiCurrentListPtr()[0];
-  }
-  return freq;
-}
-static void drawScanUiOverlay() {
-  if (!uiScanOn) return;
-  display.setTextSize(1);
-  display.setCursor(0, -2);
-  display.print("s");
-  size_t len = uiCurrentListLen();
-  if (len > 0) {
-    const int barX0 = 96;
-    const int barW = 31;
-    const int barY = 0;
-    display.drawRect(barX0, barY, barW, 2, WHITE);
-    int fillW = 0;
-    if (uiScanIdx > 0) {
-      float p = (float)uiScanIdx / (float)len;
-      if (p > 1.0f) p = 1.0f;
-      fillW = (int)((barW - 2) * p);
-    }
-    if (fillW > 0) display.fillRect(barX0 + 1, barY + 1, fillW, 1, WHITE);
-  }
-}
-/* ==================== End UI Scanner Mirror (display-only) ==================== */
 
 void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;
@@ -582,22 +508,7 @@ void handleCommand(const char* line, Stream& io) {
   Serial.printf("\r> ");
 }
 
-void set_frequency(short dir) {
-  if (encoder == 1) {
-    if (dir == 1) freq = freq + fstep;
-    if (freq >= 225000000UL) freq = 225000000UL;
-    if (dir == -1) freq = freq - fstep;
-    if (fstep == 1000000 && freq <= 1000000) freq = 1000000;
-    else if (freq < 10000) freq = 10000;
-  }
-  if (encoder == 1) {
-    if (dir == 1) n = n + 1;
-    if (n > 42) n = 1;
-    if (dir == -1) n = n - 1;
-    if (n < 1) n = 42;
-  }
-}
-
+// ==================== Setup ====================
 void setup() {
   Serial.begin(BAUD);
   //while (!Serial) {}
@@ -671,6 +582,7 @@ void setup() {
   Serial.print("RP2040Zero (boot): Running loop now..\n\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
 }
 
+// ==================== Loop ====================
 void loop() {
   if (readLine(Serial, sUsbBuf, sUsbLen, CMD_BUF_SZ)) {
     handleCommand(sUsbBuf, Serial);
@@ -706,13 +618,94 @@ void loop() {
   }
 }
 
+// ==================== UI Scanner ====================
+static inline size_t uiCurrentListLen() {
+  return uiScanSrc ? uiCustomScanLen : uiHardScanLen;
+}
+static inline const uint32_t* uiCurrentListPtr() {
+  return uiScanSrc ? uiCustomScanList : uiHardScanList;
+}
+static inline void uiScanUse(uint8_t src) {
+  uiScanSrc = src ? 1 : 0;
+}
+static void uiScanStart() {
+  if (uiCurrentListLen() == 0) return;
+  uiScanOn = true;
+  uiScanIdx = 0;
+  uiScanLastMs = millis() - uiScanDelayMs;
+}
+static void uiScanStop() {
+  uiScanOn = false;
+  uiScanPending = false;
+}
+static void uiScanTick() {
+  if (!uiScanOn) return;
+  if (sts) return;
+
+  size_t len = uiCurrentListLen();
+  if (len == 0) {
+    uiScanOn = false;
+    return;
+  }
+  uint32_t now = millis();
+  if ((now - uiScanLastMs) >= uiScanDelayMs) {
+    uiScanLastMs = now;
+    const uint32_t* list = uiCurrentListPtr();
+    uiScanCurrFreqHz = list[uiScanIdx];
+    freq = uiScanCurrFreqHz;
+    uiScanIdx = (uiScanIdx + 1) % len;
+  }
+}
+static inline unsigned long uiDisplayFreqHz() {
+  if (uiScanOn) {
+    if (uiScanCurrFreqHz != 0) return uiScanCurrFreqHz;
+    if (uiCurrentListLen() > 0) return uiCurrentListPtr()[0];
+  }
+  return freq;
+}
+static void drawScanUiOverlay() {
+  if (!uiScanOn) return;
+  display.setTextSize(1);
+  display.setCursor(0, -2);
+  display.print("s");
+  size_t len = uiCurrentListLen();
+  if (len > 0) {
+    const int barX0 = 96;
+    const int barW = 31;
+    const int barY = 0;
+    display.drawRect(barX0, barY, barW, 2, WHITE);
+    int fillW = 0;
+    if (uiScanIdx > 0) {
+      float p = (float)uiScanIdx / (float)len;
+      if (p > 1.0f) p = 1.0f;
+      fillW = (int)((barW - 2) * p);
+    }
+    if (fillW > 0) display.fillRect(barX0 + 1, barY + 1, fillW, 1, WHITE);
+  }
+}
+
+// ==================== Tuner ====================
+void set_frequency(short dir) {
+  if (encoder == 1) {
+    if (dir == 1) freq = freq + fstep;
+    if (freq >= 225000000UL) freq = 225000000UL;
+    if (dir == -1) freq = freq - fstep;
+    if (fstep == 1000000 && freq <= 1000000) freq = 1000000;
+    else if (freq < 10000) freq = 10000;
+  }
+  if (encoder == 1) {
+    if (dir == 1) n = n + 1;
+    if (n > 42) n = 1;
+    if (dir == -1) n = n - 1;
+    if (n < 1) n = 42;
+  }
+}
 void tunegen() {
   if (uiScanOn) return;  // Mirror mode: don’t drive the Nano
   uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
   uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
   si5351.set_freq(outCentiHz, SI5351_CLK0);
 }
-
 static void formatFreqSmart(uint32_t hz, char* out, size_t outSz) {
   // Formats Hz as "### Hz", "###.### kHz", or "###.### MHz" (trims trailing zeros)
   if (hz < 1000UL) {
@@ -752,7 +745,6 @@ static void formatFreqSmart(uint32_t hz, char* out, size_t outSz) {
     }
   }
 }
-
 void displayfreq() {
   unsigned long df = uiDisplayFreqHz();
   unsigned int m = df / 1000000UL;
@@ -776,7 +768,6 @@ void displayfreq() {
   }
   display.print(buffer);
 }
-
 void setstep() {
   switch (stp) {
     case 1:
@@ -813,14 +804,12 @@ void setstep() {
       break;
   }
 }
-
 void inc_preset() {
   count++;
   if (count > 21) count = 1;
   bandpresets();
   delay(50);
 }
-
 void bandpresets() {
   switch (count) {
     case 1: freq = 100000; break;
@@ -848,7 +837,6 @@ void bandpresets() {
   stp = 4;
   setstep();
 }
-
 void layout() {
   display.setTextColor(WHITE);
   display.drawLine(0, 20, 127, 20, WHITE);
@@ -896,7 +884,6 @@ void layout() {
   drawScanUiOverlay();
   display.display();
 }
-
 void bandlist() {
   display.setTextSize(2);
   display.setCursor(0, 25);
@@ -924,7 +911,6 @@ void bandlist() {
   if (count == 1) interfreq = 0;
   else if (!sts) interfreq = IF;
 }
-
 void drawbargraph() {
   byte y = map(n, 1, 42, 1, 14);
 
