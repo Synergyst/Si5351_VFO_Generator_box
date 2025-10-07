@@ -1,5 +1,5 @@
 #include <Adafruit_SSD1306.h>   // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
-#include <Adafruit_NeoPixel.h>  // WS2812 LED
+#include <Adafruit_NeoPixel.h>  // WaveShare RP2040 Zero's WS2812 LED
 #include <si5351.h>             // Etherkit https://github.com/etherkit/Si5351Arduino
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
@@ -9,13 +9,14 @@
 #define BAND_INIT 18       // Initial band preset
 #define STEP_INIT 6        // Initial step size preset
 #define XT_CAL_F 0         // XTAL ppm drift calibration amount
-#define S_GAIN 505         //
-#define BAUD 9600          // USB serial baud rate
+#define S_GAIN 505         // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
+#define SM_ADC A1          // Signal Meter ADC pin
 #define rotLeft 6          // Rotary-left pin
 #define rotRight 7         // Rotary-right pin
-#define LED_PIN 16         // WS2812 LED
+#define LED_PIN 16         // WS2812 LED pin
 #define LED_COUNT 1        // The WaveShare RP2040 Zero only has the one LED
 #define WAIT_USB_SERIAL 0  // Wait for a client to connect to USB serial connsole
+#define BAUD 9600          // USB serial baud rate
 
 // ==================== Tuner variables ====================
 unsigned long freq, freqold, fstep;
@@ -49,12 +50,13 @@ static size_t sUsbLen = 0;             // USB serial pending buffer input length
 static const size_t UI_MAX_CUSTOM_SCAN = 255;  // Max custom scan list length
 static bool uiScanOn = false;                  // Scanner off initially
 static uint8_t uiScanSrc = 0;                  // 0 = hard list, 1 = custom list
-static uint32_t uiScanDelayMs = 5000;          // per-step delay (ms)
+static uint32_t uiScanDelayMs = 100;           // per-step delay (ms)
 static uint32_t uiScanLastMs = 0;              // Last scan cycle in milliseconds
 static size_t uiScanIdx = 0;                   // Current list index
 static uint32_t uiScanCurrFreqHz = 0;          // Current scanner frequency in Hertz
 static size_t uiCustomScanLen = 0;             // Length of custom scan list
-static const uint32_t uiHardScanList[] PROGMEM = {
+// FM broadcast + NOAA (WX needs to be commented out for now until we can get a programmable DSP)
+/*static const uint32_t uiHardScanList[] PROGMEM = {
   96300000UL,   // 96.3 MHz -
   102500000UL,  // 102.5 MHz -
   103300000UL,  // 103.3 MHz -
@@ -62,6 +64,49 @@ static const uint32_t uiHardScanList[] PROGMEM = {
   106500000UL,  // 106.5 MHz -
   107700000UL,  // 107.7 MHz -
   162550000UL   // 162.550 MHz - NOAA WX Ch 7
+};*/
+// CB 40-channel
+static const uint32_t uiHardScanList[] PROGMEM = {
+  26965000UL,  // 26.965 MHz - CB Channel 1
+  26975000UL,  // 26.975 MHz - CB Channel 2
+  26985000UL,  // 26.985 MHz - CB Channel 3
+  26995000UL,  // 26.995 MHz - CB Channel 4
+  27005000UL,  // 27.005 MHz - CB Channel 5
+  27015000UL,  // 27.015 MHz - CB Channel 6
+  27025000UL,  // 27.025 MHz - CB Channel 7
+  27035000UL,  // 27.035 MHz - CB Channel 8
+  27055000UL,  // 27.055 MHz - CB Channel 9
+  27065000UL,  // 27.065 MHz - CB Channel 10
+  27075000UL,  // 27.075 MHz - CB Channel 11
+  27085000UL,  // 27.085 MHz - CB Channel 12
+  27095000UL,  // 27.095 MHz - CB Channel 13
+  27105000UL,  // 27.105 MHz - CB Channel 14
+  27115000UL,  // 27.115 MHz - CB Channel 15
+  27125000UL,  // 27.125 MHz - CB Channel 16
+  27135000UL,  // 27.135 MHz - CB Channel 17
+  27145000UL,  // 27.145 MHz - CB Channel 18
+  27155000UL,  // 27.155 MHz - CB Channel 19
+  27165000UL,  // 27.165 MHz - CB Channel 20
+  27175000UL,  // 27.175 MHz - CB Channel 21
+  27185000UL,  // 27.185 MHz - CB Channel 22
+  27205000UL,  // 27.205 MHz - CB Channel 23
+  27215000UL,  // 27.215 MHz - CB Channel 24
+  27225000UL,  // 27.225 MHz - CB Channel 25
+  27255000UL,  // 27.255 MHz - CB Channel 26
+  27265000UL,  // 27.265 MHz - CB Channel 27
+  27275000UL,  // 27.275 MHz - CB Channel 28
+  27285000UL,  // 27.285 MHz - CB Channel 29
+  27295000UL,  // 27.295 MHz - CB Channel 30
+  27305000UL,  // 27.305 MHz - CB Channel 31
+  27315000UL,  // 27.315 MHz - CB Channel 32
+  27325000UL,  // 27.325 MHz - CB Channel 33
+  27335000UL,  // 27.335 MHz - CB Channel 34
+  27345000UL,  // 27.345 MHz - CB Channel 35
+  27355000UL,  // 27.355 MHz - CB Channel 36
+  27365000UL,  // 27.365 MHz - CB Channel 37
+  27375000UL,  // 27.375 MHz - CB Channel 38
+  27385000UL,  // 27.385 MHz - CB Channel 39
+  27405000UL   // 27.405 MHz - CB Channel 40
 };
 static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);  // Hard scan list length
 static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                    // Custom scanner list
@@ -74,26 +119,6 @@ Si5351 si5351(0x60);                                          // Si531 programma
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);  // WS2812 LED on WaveShare RP2040 Zero PCB
 
 // ==================== Rotary Encoder ====================
-/*inline void pollEncoder() {
-  uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
-  uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
-  uint8_t curr = (a << 1) | b;
-  uint8_t idx = (encPrev << 2) | curr;
-  int8_t delta = encTable[idx];
-  if (delta != 0) {
-    encAccum += delta;
-    if (encAccum >= 4) {
-      set_frequency(1);
-      encAccum = 0;
-      delay(50);
-    } else if (encAccum <= -4) {
-      set_frequency(-1);
-      encAccum = 0;
-      delay(50);
-    }
-  }
-  encPrev = curr;
-}*/
 inline void pollEncoder() {
   static uint32_t lastStepMs = 0;
   const uint8_t a = (digitalRead(rotRight) == LOW);
@@ -423,6 +448,17 @@ void sendHelpRP() {
   Serial.println("  IF <kHz>              - set IF in kHz (0 .. 200000)");
   Serial.println("  SIGMETER <1..14>      - set S-meter bucket");
   Serial.println();
+  Serial.println("Scanning:");
+  Serial.println("  SCAN START            - start scanning current list");
+  Serial.println("  SCAN STOP             - stop scanning");
+  Serial.println("  SCAN?                 - show scanner status");
+  Serial.println("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
+  Serial.println("  SCAN SRC CUSTOM       - use custom list");
+  Serial.println("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
+  Serial.println("  SCAN ADD <Hz>         - add a frequency to custom list");
+  Serial.println("  SCAN CLEAR            - clear custom list");
+  Serial.println("  SCAN LIST?            - show current scan list");
+  Serial.println();
   Serial.println("Console editing:");
   Serial.println("  Enter (CR/LF)         - submit line");
   Serial.println("  Backspace/Delete      - erase last character");
@@ -486,6 +522,107 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
+  // ==================== Scanner commands ====================
+  if (fromUSB) {
+    // ==================== SCAN? ====================
+    if (!strcmp(line, "SCAN?")) {
+      sendScanStatus();
+      Serial.printf("\r> ");
+      return;
+    }
+    // ==================== SCAN START ====================
+    if (!strcmp(line, "SCAN START")) {
+      if (uiCurrentListLen() == 0) {
+        Serial.println("Scan: no entries in current list");
+      } else {
+        uiScanStart();
+        Serial.println("Scan: started");
+      }
+      Serial.printf("\r> ");
+      return;
+    }
+    // ==================== SCAN STOP ====================
+    if (!strcmp(line, "SCAN STOP")) {
+      uiScanStop();
+      Serial.println("Scan: stopped");
+      Serial.printf("\r> ");
+      return;
+    }
+    // ==================== SCAN SRC HARD ====================
+    if (!strcmp(line, "SCAN SRC HARD")) {
+      uiScanUse(0);
+      Serial.println("Scan: source = HARD");
+      Serial.printf("\r> ");
+      return;
+    }
+    // ==================== SCAN SRC CUSTOM ====================
+    if (!strcmp(line, "SCAN SRC CUSTOM")) {
+      if (uiCustomScanLen == 0) {
+        Serial.println("Scan: CUSTOM list empty (use: SCAN ADD <Hz>)");
+      } else {
+        uiScanUse(1);
+        Serial.println("Scan: source = CUSTOM");
+      }
+      Serial.printf("\r> ");
+      return;
+    }
+    // ==================== SCAN DELAY <ms> ====================
+    {
+      unsigned long ms = 0;
+      if (sscanf(line, "SCAN DELAY %lu", &ms) == 1) {
+        if (ms < 20) ms = 20;
+        if (ms > 10000UL) ms = 10000UL;
+        uiScanDelayMs = (uint32_t)ms;
+        Serial.printf("Scan: delay = %lu ms\n", (unsigned long)uiScanDelayMs);
+        Serial.printf("\r> ");
+        return;
+      }
+    }
+    // ==================== SCAN ADD <Hz> ====================
+    {
+      unsigned long hz = 0;
+      if (sscanf(line, "SCAN ADD %lu", &hz) == 1) {
+        if (hz < 10000UL) hz = 10000UL;
+        if (hz > 225000000UL) hz = 225000000UL;
+        if (uiCustomScanLen >= UI_MAX_CUSTOM_SCAN) {
+          Serial.printf("Scan: custom list full (%lu max)\n", (unsigned long)UI_MAX_CUSTOM_SCAN);
+        } else {
+          uiCustomScanList[uiCustomScanLen++] = (uint32_t)hz;
+          char buf[32];
+          formatFreqSmart((uint32_t)hz, buf, sizeof(buf));
+          Serial.printf("Scan: added %lu Hz (%s), custom len=%lu\n",
+                        (unsigned long)hz, buf, (unsigned long)uiCustomScanLen);
+        }
+        Serial.printf("\r> ");
+        return;
+      }
+    }
+    // ==================== SCAN CLEAR ====================
+    if (!strcmp(line, "SCAN CLEAR")) {
+      uiCustomScanLen = 0;
+      if (uiScanSrc == 1) {
+        uiScanStop();
+        uiScanUse(0);  // fall back to HARD if custom emptied
+      }
+      Serial.println("Scan: custom list cleared");
+      Serial.printf("\r> ");
+      return;
+    }
+    // ==================== SCAN LIST? ====================
+    if (!strcmp(line, "SCAN LIST?")) {
+      const uint32_t* list = uiCurrentListPtr();
+      const size_t len = uiCurrentListLen();
+      Serial.printf("Scan list (%s), len=%lu\n", uiScanSrc ? "CUSTOM" : "HARD", (unsigned long)len);
+      for (size_t i = 0; i < len; ++i) {
+        char buf[32];
+        formatFreqSmart(list[i], buf, sizeof(buf));
+        Serial.printf("  [%lu] %lu Hz (%s)\n", (unsigned long)i, (unsigned long)list[i], buf);
+      }
+      Serial.printf("\r> ");
+      return;
+    }
+  }
+
   // ==================== Return help dialog ====================
   if ((!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H")) && fromUSB) {
     sendHelpRP();
@@ -542,7 +679,7 @@ void setup() {
   } else {
     delay(3000);
   }
-  Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.2");
+  Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.4");
   Serial.println("RP2040Zero (boot): Starting now..");
 
   // ==================== Rotary init ====================
@@ -679,6 +816,13 @@ static void uiScanStart() {
 }
 static void uiScanStop() {
   uiScanOn = false;
+}
+static void sendScanStatus() {
+  if (uiScanOn) {
+    Serial.println("Scanning");
+  } else {
+    Serial.println("Idling");
+  }
 }
 static void uiScanTick() {
   if (!uiScanOn) return;
