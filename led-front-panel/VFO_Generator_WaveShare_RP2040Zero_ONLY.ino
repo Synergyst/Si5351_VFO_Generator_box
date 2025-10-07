@@ -1,6 +1,7 @@
 #include <Adafruit_SSD1306.h>   // Adafruit SSD1306 https://github.com/adafruit/Adafruit_SSD1306
 #include <Adafruit_NeoPixel.h>  // WaveShare RP2040 Zero's WS2812 LED
 #include <si5351.h>             // Etherkit https://github.com/etherkit/Si5351Arduino
+#include <LittleFS.h>           // LittleFS for storing user-tunables
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
 #include <stdarg.h>
@@ -151,6 +152,196 @@ Si5351 si5351(0x60);                                          // Si531 programma
 
 // ==================== WS2812 LED ====================
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);  // WS2812 LED on WaveShare RP2040 Zero PCB
+
+// ==================== Persistent storage using LittleFS ====================
+struct CfgV1 {
+  uint32_t magic;
+  uint16_t ver;
+  uint16_t reserved;
+  uint32_t freq_hz;
+  int32_t if_khz;
+  uint8_t stp_idx;
+  uint8_t band_count;
+  uint8_t s_meter_x;
+  uint8_t scan_src;  // 0=HARD, 1=CUSTOM
+  uint32_t scan_delay_ms;
+  uint16_t tty_rows;
+  uint16_t tty_cols;
+  uint8_t tty_ansi;  // 0/1
+  uint8_t pad0;
+  uint16_t custom_len;
+  uint32_t custom_list[UI_MAX_CUSTOM_SCAN];
+};                                                      // configuration file version 1 file format
+static const char* CFG_PATH = "/vfo.cfg";               // Config location in flash
+static const uint32_t CFG_MAGIC = 0x52504631;           // 'RPF1'
+static const uint16_t CFG_VERSION = 1;                  // Configuration file format version
+static bool sCfgLoaded = false;                         // is configuration file loaded
+static bool sCfgDirty = false;                          // is configuration file dirty
+static unsigned long sCfgDirtySince = 0;                // time in milliseconds since config was dirty
+static unsigned long sCfgLastSave = 0;                  // time in milliseconds since config was last saved
+static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // min gap between writes
+static const unsigned long CFG_DEBOUNCE_MS = 1000;      // delay after last change before saving
+static inline unsigned long stepIndexToFstep(uint8_t stpIdx) {
+  // Helper: map step index -> step size (Hz), mirrors your setstep() table without cycling
+  switch (stpIdx) {
+    case 2: return 1UL;
+    case 3: return 10UL;
+    case 4: return 1000UL;
+    case 5: return 5000UL;
+    case 6: return 10000UL;
+    case 7: return 100000UL;
+    case 8: return 1000000UL;
+    case 1: return 10000000UL;
+    default: return 1000UL;  // safe default: 1 kHz
+  }
+}
+static inline uint32_t clampHz(uint32_t hz) {
+  if (hz < 10000UL) return 10000UL;
+  if (hz > 225000000UL) return 225000000UL;
+  return hz;
+}
+static inline int32_t clampIfKHz(int32_t ifk) {
+  if (ifk < 0) return 0;
+  if (ifk > 200000) return 200000;
+  return ifk;
+}
+static inline uint32_t clampScanDelay(uint32_t ms) {
+  if (ms < 20UL) return 20UL;
+  if (ms > 10000UL) return 10000UL;
+  return ms;
+}
+static inline uint16_t clampRows(uint16_t r) {
+  if (r < 12) return 12;
+  if (r > 80) return 80;
+  return r;
+}
+static inline uint16_t clampCols(uint16_t c) {
+  if (c < 40) return 40;
+  if (c > 200) return 200;
+  return c;
+}
+static void cfgApply(const CfgV1& c) {
+  // Sanitize first
+  uint32_t fHz = clampHz(c.freq_hz);
+  int32_t ifKHz = clampIfKHz(c.if_khz);
+  uint8_t stpIdx = (c.stp_idx >= 1 && c.stp_idx <= 8) ? c.stp_idx : 4;
+  uint8_t bc = (c.band_count >= 1 && c.band_count <= 21) ? c.band_count : count;
+  uint8_t smx = (c.s_meter_x >= 1 && c.s_meter_x <= 14) ? c.s_meter_x : x;
+  uint8_t scanSrc = (c.scan_src ? 1 : 0);
+  uint32_t scanDelay = clampScanDelay(c.scan_delay_ms);
+  uint16_t cr = clampRows(c.tty_rows);
+  uint16_t cc = clampCols(c.tty_cols);
+  uint16_t clen = c.custom_len;
+  if (clen > UI_MAX_CUSTOM_SCAN) clen = UI_MAX_CUSTOM_SCAN;
+
+  // Apply to your globals
+  freq = fHz;
+  interfreq = ifKHz;
+  stp = stpIdx;
+  fstep = stepIndexToFstep(stpIdx);
+  count = bc;
+  x = smx;
+  uiScanSrc = scanSrc;
+  uiScanDelayMs = scanDelay;
+  tuiAnsi = (c.tty_ansi != 0);
+  tuiRows = cr;
+  tuiCols = cc;
+
+  uiCustomScanLen = clen;
+  for (size_t i = 0; i < clen; ++i) {
+    uiCustomScanList[i] = clampHz(c.custom_list[i]);
+  }
+}
+static void cfgFillFromGlobals(CfgV1& c) {
+  memset(&c, 0, sizeof(c));
+  c.magic = CFG_MAGIC;
+  c.ver = CFG_VERSION;
+  c.freq_hz = clampHz(freq);
+  c.if_khz = clampIfKHz(interfreq);
+  c.stp_idx = stp;
+  c.band_count = count;
+  c.s_meter_x = (x >= 1 && x <= 14) ? x : 1;
+  c.scan_src = uiScanSrc ? 1 : 0;
+  c.scan_delay_ms = clampScanDelay(uiScanDelayMs);
+  c.tty_rows = clampRows(tuiRows);
+  c.tty_cols = clampCols(tuiCols);
+  c.tty_ansi = tuiAnsi ? 1 : 0;
+  c.custom_len = (uiCustomScanLen <= UI_MAX_CUSTOM_SCAN) ? uiCustomScanLen : UI_MAX_CUSTOM_SCAN;
+  for (size_t i = 0; i < c.custom_len; ++i) c.custom_list[i] = clampHz(uiCustomScanList[i]);
+}
+static bool cfgLoad() {
+  if (!LittleFS.begin()) {
+    Serial.println("\rRP2040Zero (cfg): LittleFS mount failed\n> ");
+    return false;
+  }
+  if (!LittleFS.exists(CFG_PATH)) {
+    Serial.println("\rRP2040Zero (cfg): no config file, using defaults\n> ");
+    return false;
+  }
+  File f = LittleFS.open(CFG_PATH, "r");
+  if (!f) {
+    Serial.println("\rRP2040Zero (cfg): open failed\n> ");
+    return false;
+  }
+  CfgV1 c;
+  size_t got = f.read((uint8_t*)&c, sizeof(c));
+  f.close();
+  if (got < offsetof(CfgV1, custom_list)) {
+    Serial.println("\rRP2040Zero (cfg): short read\n> ");
+    return false;
+  }
+  if (c.magic != CFG_MAGIC || c.ver != CFG_VERSION) {
+    Serial.println("\rRP2040Zero (cfg): bad magic/version\n> ");
+    return false;
+  }
+  cfgApply(c);
+  sCfgLoaded = true;
+  Serial.println("\rRP2040Zero (cfg): loaded\n> ");
+  return true;
+}
+static bool cfgSaveNow() {
+  if (!LittleFS.begin()) {
+    Serial.println("\rRP2040Zero (cfg): FS mount failed (save)\n> ");
+    return false;
+  }
+  CfgV1 c;
+  cfgFillFromGlobals(c);
+  File f = LittleFS.open(CFG_PATH, "w");
+  if (!f) {
+    Serial.println("\rRP2040Zero (cfg): open for write failed\n> ");
+    return false;
+  }
+  size_t want = sizeof(c);
+  size_t wr = f.write((const uint8_t*)&c, want);
+  f.flush();
+  f.close();
+  if (wr != want) {
+    Serial.println("\rRP2040Zero (cfg): short write\n> ");
+    return false;
+  }
+  sCfgLastSave = millis();
+  Serial.println("\rRP2040Zero (cfg): saved\n> ");
+  return true;
+}
+static void cfgMarkDirty() {
+  sCfgDirty = true;
+  sCfgDirtySince = millis();
+}
+static void cfgInitAndLoad() {
+  (void)cfgLoad();  // okay if it fails; we keep defaults
+  sCfgDirty = false;
+  sCfgDirtySince = 0;
+  sCfgLastSave = 0;
+}
+static void cfgTick() {
+  if (!sCfgDirty) return;
+  unsigned long now = millis();
+  if ((now - sCfgDirtySince) >= CFG_DEBOUNCE_MS && (now - sCfgLastSave) >= CFG_MIN_SAVE_GAP_MS) {
+    if (cfgSaveNow()) {
+      sCfgDirty = false;
+    }
+  }
+}
 
 // ==================== Rotary Encoder ====================
 inline void pollEncoder() {
@@ -852,7 +1043,7 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
 }
 
 // ==================== Command handlers ====================
-void sendHelpRP() {
+/*void sendHelpRP() {
   Serial.println("RP2040Zero Help:");
   Serial.println("General:");
   Serial.println("  HELP | ? | H          - show this help");
@@ -888,47 +1079,88 @@ void sendHelpRP() {
   Serial.println("  Ctrl-U                - clear entire line");
   Serial.println("  Ctrl-W                - delete previous word");
   Serial.println("  Ctrl-C                - cancel current line");
-}
+}*/
 static void sendHelpTo(Stream& out) {
-  // Optional: richer help that can write to any Stream or to TUI log
-  out.print("RP2040Zero Help:");
-  out.print("General:");
-  out.print("  HELP | ? | H          - show this help");
-  out.print("HW:");
-  out.print("  BOOTSEL               - reboot to UF2 bootloader");
-  out.print("  I2C?                  - scan I2C bus and print devices");
-  out.print("Unimplemented HW buttons:");
-  out.print("  SETSTEP               - set rotary knob step count");
-  out.print("  INCBAND               - increment band preset");
-  out.print("Tuning/state:");
-  out.print("  FREQ?                 - query current frequency");
-  out.print("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
-  out.print("  IF <kHz>              - set IF in kHz (0 .. 200000)");
-  out.print("  SIGMETER <1..14>      - set S-meter bucket");
-  out.print("Scanning:");
-  out.print("  SCAN START            - start scanning current list");
-  out.print("  SCAN STOP             - stop scanning");
-  out.print("  SCAN?                 - show scanner status");
-  out.print("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
-  out.print("  SCAN SRC CUSTOM       - use custom list");
-  out.print("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
-  out.print("  SCAN ADD <Hz>         - add a frequency to custom list");
-  out.print("  SCAN CLEAR            - clear custom list");
-  out.print("  SCAN LIST?            - show current scan list");
-  out.print("Terminal UI:");
-  out.print("  TTY ON                - enable terminal UI (ANSI/VT100)");
-  out.print("  TTY OFF               - disable terminal UI");
-  out.print("  TTY?                  - show TTY status");
-  out.print("  TTY ANSI ON|OFF       - enable/disable ANSI usage");
-  out.print("  TTY REDRAW            - force full redraw");
-  out.print("  TTY SIZE <rows> <cols>- set terminal rows/cols (for layout)");
-  out.print("Console editing:");
-  out.print("  Enter (CR/LF)         - submit line");
-  out.print("  Backspace/Delete      - erase last character");
-  out.print("  Ctrl-U                - clear entire line");
-  out.print("  Ctrl-W                - delete previous word");
-  out.print("  Ctrl-C                - cancel current line");
-  out.println();
+  if (tuiEnabled) {
+    // Optional: richer help that can write to any Stream or to TUI log
+    out.print("RP2040Zero Help:");
+    out.print("General:");
+    out.print("  HELP | ? | H          - show this help");
+    out.print("HW:");
+    out.print("  BOOTSEL               - reboot to UF2 bootloader");
+    out.print("  I2C?                  - scan I2C bus and print devices");
+    out.print("Unimplemented HW buttons:");
+    out.print("  SETSTEP               - set rotary knob step count");
+    out.print("  INCBAND               - increment band preset");
+    out.print("Tuning/state:");
+    out.print("  FREQ?                 - query current frequency");
+    out.print("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
+    out.print("  IF <kHz>              - set IF in kHz (0 .. 200000)");
+    out.print("  SIGMETER <1..14>      - set S-meter bucket");
+    out.print("Scanning:");
+    out.print("  SCAN START            - start scanning current list");
+    out.print("  SCAN STOP             - stop scanning");
+    out.print("  SCAN?                 - show scanner status");
+    out.print("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
+    out.print("  SCAN SRC CUSTOM       - use custom list");
+    out.print("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
+    out.print("  SCAN ADD <Hz>         - add a frequency to custom list");
+    out.print("  SCAN CLEAR            - clear custom list");
+    out.print("  SCAN LIST?            - show current scan list");
+    out.print("Terminal UI:");
+    out.print("  TTY ON                - enable terminal UI (ANSI/VT100)");
+    out.print("  TTY OFF               - disable terminal UI");
+    out.print("  TTY?                  - show TTY status");
+    out.print("  TTY ANSI ON|OFF       - enable/disable ANSI usage");
+    out.print("  TTY REDRAW            - force full redraw");
+    out.print("  TTY SIZE <rows> <cols>- set terminal rows/cols (for layout)");
+    out.print("Console editing:");
+    out.print("  Enter (CR/LF)         - submit line");
+    out.print("  Backspace/Delete      - erase last character");
+    out.print("  Ctrl-U                - clear entire line");
+    out.print("  Ctrl-W                - delete previous word");
+    out.print("  Ctrl-C                - cancel current line");
+    out.println();
+  } else {
+    out.println("RP2040Zero Help:");
+    out.println("General:");
+    out.println("  HELP | ? | H          - show this help");
+    out.println("HW:");
+    out.println("  BOOTSEL               - reboot to UF2 bootloader");
+    out.println("  I2C?                  - scan I2C bus and print devices");
+    out.println("Unimplemented HW buttons:");
+    out.println("  SETSTEP               - set rotary knob step count");
+    out.println("  INCBAND               - increment band preset");
+    out.println("Tuning/state:");
+    out.println("  FREQ?                 - query current frequency");
+    out.println("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
+    out.println("  IF <kHz>              - set IF in kHz (0 .. 200000)");
+    out.println("  SIGMETER <1..14>      - set S-meter bucket");
+    out.println("Scanning:");
+    out.println("  SCAN START            - start scanning current list");
+    out.println("  SCAN STOP             - stop scanning");
+    out.println("  SCAN?                 - show scanner status");
+    out.println("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
+    out.println("  SCAN SRC CUSTOM       - use custom list");
+    out.println("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
+    out.println("  SCAN ADD <Hz>         - add a frequency to custom list");
+    out.println("  SCAN CLEAR            - clear custom list");
+    out.println("  SCAN LIST?            - show current scan list");
+    out.println("Terminal UI:");
+    out.println("  TTY ON                - enable terminal UI (ANSI/VT100)");
+    out.println("  TTY OFF               - disable terminal UI");
+    out.println("  TTY?                  - show TTY status");
+    out.println("  TTY ANSI ON|OFF       - enable/disable ANSI usage");
+    out.println("  TTY REDRAW            - force full redraw");
+    out.println("  TTY SIZE <rows> <cols>- set terminal rows/cols (for layout)");
+    out.println("Console editing:");
+    out.println("  Enter (CR/LF)         - submit line");
+    out.println("  Backspace/Delete      - erase last character");
+    out.println("  Ctrl-U                - clear entire line");
+    out.println("  Ctrl-W                - delete previous word");
+    out.println("  Ctrl-C                - cancel current line");
+    out.println();
+  }
 }
 static void sendScanStatus(Stream& io) {
   // Existing sendHelpRP can remain; we’ll prefer sendHelpTo so help appears inside TUI log when active.
@@ -979,10 +1211,21 @@ void handleCommand(const char* line, Stream& io) {
     rp2040.rebootToBootloader();
     return;
   }
+  // ==================== Factory reset ====================
+  if (!strcmp(line, "FACTORYRESETNOW") && fromUSB) {
+    outLine("Rebooting to bootloader now!");
+    delay(100);
+    LittleFS.remove("/vfo.cfg");
+    delay(100);
+    rp2040.reboot();
+    delay(100);
+    return;
+  }
   // ==================== Cycle to next step size preset ====================
   if (!strcmp(line, "SETSTEP") && fromUSB) {
     time_now = (millis() + 300);
     setstep();
+    cfgMarkDirty();  // persist stp/fstep
     delay(300);
     termPrompt();
     tuiMarkDirty();
@@ -992,6 +1235,7 @@ void handleCommand(const char* line, Stream& io) {
   if (!strcmp(line, "INCBAND") && fromUSB) {
     time_now = (millis() + 300);
     inc_preset();
+    cfgMarkDirty();  // persist stp/fstep
     delay(300);
     termPrompt();
     tuiMarkDirty();
@@ -1049,6 +1293,7 @@ void handleCommand(const char* line, Stream& io) {
     }
     if (!strcmp(line, "TTY ANSI ON")) {
       tuiAnsi = true;
+      cfgMarkDirty();  // persist stp/fstep
       if (tuiEnabled) {
         tuiExit();
         tuiEnter();
@@ -1059,6 +1304,7 @@ void handleCommand(const char* line, Stream& io) {
     if (!strcmp(line, "TTY ANSI OFF")) {
       if (tuiEnabled) tuiSetEnabled(false);
       tuiAnsi = false;
+      cfgMarkDirty();  // persist stp/fstep
       outLine("ANSI disabled. Use TTY ANSI ON then TTY ON to re-enable UI.");
       termPrompt();
       return;
@@ -1070,6 +1316,7 @@ void handleCommand(const char* line, Stream& io) {
         if (r >= 12 && r <= 80 && c >= 40 && c <= 200) {
           tuiRows = r;
           tuiCols = c;
+          cfgMarkDirty();  // persist stp/fstep
           tuiComputeRows();
           tuiDirtyFull = true;
           outPrintf("TTY size set to %ux%u\n", tuiRows, tuiCols);
@@ -1128,6 +1375,7 @@ void handleCommand(const char* line, Stream& io) {
     }
     if (!strcmp(line, "SCAN SRC HARD")) {
       uiScanUse(0);
+      cfgMarkDirty();  // persist stp/fstep
       outLine("Scan: source = HARD");
       termPrompt();
       tuiMarkDirty();
@@ -1138,6 +1386,7 @@ void handleCommand(const char* line, Stream& io) {
         outLine("Scan: CUSTOM list empty (use: SCAN ADD <Hz>)");
       } else {
         uiScanUse(1);
+        cfgMarkDirty();  // persist stp/fstep
         outLine("Scan: source = CUSTOM");
       }
       termPrompt();
@@ -1150,6 +1399,7 @@ void handleCommand(const char* line, Stream& io) {
         if (ms < 20) ms = 20;
         if (ms > 10000UL) ms = 10000UL;
         uiScanDelayMs = (uint32_t)ms;
+        cfgMarkDirty();  // persist stp/fstep
         outPrintf("Scan: delay = %lu ms\n", (unsigned long)uiScanDelayMs);
         termPrompt();
         tuiMarkDirty();
@@ -1165,6 +1415,7 @@ void handleCommand(const char* line, Stream& io) {
           outPrintf("Scan: custom list full (%lu max)\n", (unsigned long)UI_MAX_CUSTOM_SCAN);
         } else {
           uiCustomScanList[uiCustomScanLen++] = (uint32_t)hz;
+          cfgMarkDirty();  // persist stp/fstep
           char buf[32];
           formatFreqSmart((uint32_t)hz, buf, sizeof(buf));
           outPrintf("Scan: added %lu Hz (%s), custom len=%lu\n",
@@ -1181,6 +1432,7 @@ void handleCommand(const char* line, Stream& io) {
         uiScanStop();
         uiScanUse(0);
       }
+      cfgMarkDirty();  // persist stp/fstep
       outLine("Scan: custom list cleared");
       termPrompt();
       tuiMarkDirty();
@@ -1255,6 +1507,7 @@ void handleCommand(const char* line, Stream& io) {
       if (val < 10000) val = 10000;
       if ((unsigned long)val > 225000000UL) val = 225000000UL;
       freq = (unsigned long)val;
+      cfgMarkDirty();  // persist stp/fstep
       time_now = millis();
       termPrompt();
       tuiMarkDirty();
@@ -1263,6 +1516,7 @@ void handleCommand(const char* line, Stream& io) {
       if (val < 0) val = 0;
       if (val > 200000) val = 200000;
       interfreq = val;
+      cfgMarkDirty();  // persist stp/fstep
       time_now = millis();
       termPrompt();
       tuiMarkDirty();
@@ -1271,6 +1525,7 @@ void handleCommand(const char* line, Stream& io) {
       if (val < 1) val = 1;
       if (val > 14) val = 14;
       x = (byte)val;
+      cfgMarkDirty();  // persist stp/fstep
       time_now = millis();
       termPrompt();
       tuiMarkDirty();
@@ -1336,6 +1591,11 @@ void setup() {
   stp = STEP_INIT;
   setstep();
 
+  // ==================== Persistent config ====================
+  cfgInitAndLoad();
+  // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
+  // Saved ttyRows/ttyCols/ANSI are already applied to globals.
+
   // ==================== Display init ====================
   display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3D*/);
   display.clearDisplay();
@@ -1380,9 +1640,10 @@ void loop() {
     handleCommand(sUsbBuf, Serial);
   }
 
+  cfgTick();      // ==================== Flush pending config saves (debounced to reduce wear) ====================
   pollEncoder();  // ==================== Rotary encoder polling ====================
   uiScanTick();   // ==================== Scanner tick ====================
-  tuiTick();
+  tuiTick();      // ==================== Terminal UI tick ====================
 
   // ==================== Frequency changed, retune now ====================
   if (freqold != freq) {
