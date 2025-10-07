@@ -113,6 +113,38 @@ static const uint32_t uiHardScanList[] PROGMEM = {
 static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);  // Hard scan list length
 static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                    // Custom scanner list
 
+// ==================== Terminal TUI ====================
+static bool tuiEnabled = false;                 // TUI master switch
+static bool tuiAnsi = true;                     // ANSI sequences allowed
+static bool tuiInAlt = false;                   // in alternate screen
+static bool tuiDirtyFull = false;               // needs full redraw
+static bool tuiDirtyDyn = false;                // needs dynamic-only update
+static unsigned long tuiLastDraw = 0;           // last draw time in milliseconds
+static uint16_t tuiRows = 48;                   // terminal rows (default)
+static uint16_t tuiCols = 200;                  // terminal cols (default)
+static uint16_t tuiLogTop = 24;                 // computed based on layout
+static uint16_t tuiLogBottom = (48 - 2);        // last row used by log pane (rows-2)
+static uint16_t tuiInputRow = 48;               // input row (bottom)
+static bool gTermNoEcho = false;                // Disable echo in readLine so TUI can render the input itself
+static uint16_t tuiPanelW = 44;                 // width of right-side status panel
+static const size_t TUI_LOG_MAX = 200;          // log pane max log count
+static const size_t TUI_LINE_MAX = 240;         // log pane max line count
+static char tuiLog[TUI_LOG_MAX][TUI_LINE_MAX];  // log pane log buffer
+static size_t tuiLogHead = 0;                   // next write
+static size_t tuiLogCount = 0;                  // log pane log count
+static uint16_t tuiDirtyMask = 0;               // mask value for TUI dirty
+enum {
+  // TUI mask
+  TUI_DIRTY_NONE = 0,
+  TUI_DIRTY_HEADER = 1 << 0,
+  TUI_DIRTY_SCAN = 1 << 1,
+  TUI_DIRTY_FREQ = 1 << 2,
+  TUI_DIRTY_BARS = 1 << 3,
+  TUI_DIRTY_LOG = 1 << 4,
+  TUI_DIRTY_INPUT = 1 << 5,
+  TUI_DIRTY_FULL = 1 << 15
+};
+
 // ==================== I2C devices ====================
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);  // SSD1306 OLED mono display (128x64 resolution)
 Si5351 si5351(0x60);                                          // Si531 programmable clock generator
@@ -142,8 +174,8 @@ inline void pollEncoder() {
 }
 
 // ==================== TUI section start ====================
-// ==================== Small printf helper for Streams ====================
 static void sPrintf(Stream& s, const char* fmt, ...) {
+  // Small printf helper for Streams
   char buf[256];
   va_list ap;
   va_start(ap, fmt);
@@ -151,37 +183,24 @@ static void sPrintf(Stream& s, const char* fmt, ...) {
   va_end(ap);
   s.write((const uint8_t*)buf, strlen(buf));
 }
-// ==================== Terminal TUI ====================
-static bool tuiEnabled = false;    // TUI master switch
-static bool tuiAnsi = true;        // ANSI sequences allowed
-static bool tuiInAlt = false;      // in alternate screen
-static bool tuiDirtyFull = false;  // needs full redraw
-static bool tuiDirtyDyn = false;   // needs dynamic-only update
-static unsigned long tuiLastDraw = 0;
-static uint16_t tuiRows = 48;             // terminal rows (default)
-static uint16_t tuiCols = 200;            // terminal cols (default)
-static uint16_t tuiLogTop = 24;           // computed based on layout
-static uint16_t tuiLogBottom = (48 - 2);  // last row used by log pane (rows-2)
-static uint16_t tuiInputRow = 48;         // input row (bottom)
-// Disable echo in readLine so TUI can render the input itself
-static bool gTermNoEcho = false;
 // ==================== TUI layout utilities (right-side panel) ====================
-static uint16_t tuiPanelW = 44;       // width of right-side status panel
-static inline uint16_t tuiPanelX() {  // 1-based column where the panel starts
+static inline uint16_t tuiPanelX() {
+  // 1-based column where the panel starts
   return (tuiCols > tuiPanelW) ? (tuiCols - tuiPanelW + 1) : 1;
 }
-static inline uint16_t tuiLogWidth() {  // width available to the left-side console
+static inline uint16_t tuiLogWidth() {
+  // width available to the left-side console
   uint16_t px = tuiPanelX();
   if (px <= 2) return tuiCols;  // no space for a gap -> use full width
   return (uint16_t)(px - 2);    // keep 1-col gutter between log and panel
 }
-// Clear a rectangular region width 'w' starting at (row r, col c)
 static void clearRegion(Stream& s, uint16_t r, uint16_t c, uint16_t w) {
+  // Clear a rectangular region width 'w' starting at (row r, col c)
   if (w == 0) return;
   vtMove(s, r, c);
   for (uint16_t i = 0; i < w; ++i) s.write(' ');
 }
-// Simple VT100 helpers
+// ==================== Simple VT100 helpers ====================
 static void vt(Stream& s, const char* seq) {
   if (tuiAnsi) s.print(seq);
 }
@@ -229,12 +248,7 @@ static void vtRevOn(Stream& s) {
 static void vtRevOff(Stream& s) {
   if (tuiAnsi) s.print("\x1B[27m");
 }
-// ========= Log pane (ring buffer) =========
-static const size_t TUI_LOG_MAX = 200;
-static const size_t TUI_LINE_MAX = 240;
-static char tuiLog[TUI_LOG_MAX][TUI_LINE_MAX];
-static size_t tuiLogHead = 0;  // next write
-static size_t tuiLogCount = 0;
+// ==================== Log pane (ring buffer) ====================
 static void tuiLogLine(const char* line) {
   if (!line) return;
   strncpy(tuiLog[tuiLogHead], line, TUI_LINE_MAX - 1);
@@ -277,7 +291,7 @@ static void tuiLogf(const char* fmt, ...) {
     p = nl + 1;
   }
 }
-// ========= TUI draw helpers =========
+// ==================== TUI draw helpers ====================
 static void tuiComputeRows() {
   tuiInputRow = tuiRows;
   tuiLogBottom = (tuiRows >= 2) ? (tuiRows - 2) : tuiRows;
@@ -500,17 +514,6 @@ static void tuiRedrawDynamic() {
   vtShowCur(Serial);
   tuiDirtyDyn = false;
 }
-enum {
-  TUI_DIRTY_NONE = 0,
-  TUI_DIRTY_HEADER = 1 << 0,
-  TUI_DIRTY_SCAN = 1 << 1,
-  TUI_DIRTY_FREQ = 1 << 2,
-  TUI_DIRTY_BARS = 1 << 3,
-  TUI_DIRTY_LOG = 1 << 4,
-  TUI_DIRTY_INPUT = 1 << 5,
-  TUI_DIRTY_FULL = 1 << 15
-};
-static uint16_t tuiDirtyMask = 0;
 static inline void tuiDirtySet(uint16_t m) {
   tuiDirtyMask |= m;
 }
@@ -885,8 +888,8 @@ void sendHelpRP() {
   Serial.println("  Ctrl-W                - delete previous word");
   Serial.println("  Ctrl-C                - cancel current line");
 }
-// Optional: richer help that can write to any Stream or to TUI log
 static void sendHelpTo(Stream& out) {
+  // Optional: richer help that can write to any Stream or to TUI log
   out.print("RP2040Zero Help:");
   out.print("General:");
   out.print("  HELP | ? | H          - show this help");
@@ -926,8 +929,8 @@ static void sendHelpTo(Stream& out) {
   out.print("  Ctrl-C                - cancel current line");
   out.println();
 }
-// Existing sendHelpRP can remain; we’ll prefer sendHelpTo so help appears inside TUI log when active.
 static void sendScanStatus(Stream& io) {
+  // Existing sendHelpRP can remain; we’ll prefer sendHelpTo so help appears inside TUI log when active.
   const size_t len = uiCurrentListLen();
   char buf[32];
   formatFreqSmart(uiScanCurrFreqHz, buf, sizeof(buf));
@@ -938,8 +941,8 @@ static void sendScanStatus(Stream& io) {
   io.printf("  Index: %lu\n", (unsigned long)uiScanIdx);
   if (uiScanOn) io.printf("  Current: %lu Hz (%s)\n", (unsigned long)uiScanCurrFreqHz, buf);
 }
-// Helper: show prompt in plain mode
 static void termPrompt() {
+  // Helper: show prompt in plain mode
   if (!tuiEnabled) sPrintf(Serial, "\r> ");
 }
 void handleCommand(const char* line, Stream& io) {
