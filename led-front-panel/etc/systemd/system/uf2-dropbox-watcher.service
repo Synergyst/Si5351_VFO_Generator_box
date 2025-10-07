@@ -1,0 +1,23 @@
+[Unit]
+Description=RP2040 UF2 Dropbox Watcher (picotool loader)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=UF2_DIR=/root/uf2-dropbox
+Environment=SCAN_MS=3000
+Environment=STABLE_MS=3000
+Environment=POST_WAIT_MS=3000
+Environment=BOOTSEL_SERIAL_SLEEP_MS=3000
+Environment=BOOTSEL_TIMEOUT_MS=10000
+Environment=LOAD_TIMEOUT_MS=15000
+Environment=SERIAL_TTY=/dev/ttyACM0
+Environment=PICOTOOL=/usr/local/bin/picotool
+ExecStart=/usr/bin/node /root/led-front-panel/uf2_dropbox_watcher.js
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
