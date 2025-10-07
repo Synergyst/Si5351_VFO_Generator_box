@@ -1,0 +1,21 @@
+[Unit]
+Description=LED OS Status Agent (CPU load, SSH presence, Overheat, USB presence)
+After=network-online.target led-mplex.service
+Wants=network-online.target
+Requires=led-mplex.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/root/led-front-panel/target/release/led_os_agent \
+  --host 127.0.0.1 --port 5555 \
+  --interval 1250 --max-level 8 \
+  --cpu-led PIN_11 \
+  --ssh-led PIN_29 \
+  --temp-led PIN_33 --temp-warn 50 --temp-crit 60 --blink-ms 750 \
+  --usb-led PIN_31 --usb-ids 1df7:2500,1a86:7523,2e8a:0003
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[package]
+name = "led_mplex"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+gpio-cdev = "0.6"
+anyhow = "1"
+ctrlc = "3"
+
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+regex = "1"
