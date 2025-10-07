@@ -126,7 +126,7 @@ static uint16_t tuiLogTop = 24;                 // computed based on layout
 static uint16_t tuiLogBottom = (48 - 2);        // last row used by log pane (rows-2)
 static uint16_t tuiInputRow = 48;               // input row (bottom)
 static bool gTermNoEcho = false;                // Disable echo in readLine so TUI can render the input itself
-static uint16_t tuiPanelW = 44;                 // width of right-side status panel
+static uint16_t tuiPanelW = 60;                 // width of right-side status panel
 static const size_t TUI_LOG_MAX = 200;          // log pane max log count
 static const size_t TUI_LINE_MAX = 240;         // log pane max line count
 static char tuiLog[TUI_LOG_MAX][TUI_LINE_MAX];  // log pane log buffer
@@ -319,7 +319,7 @@ static void drawHeader(Stream& s) {
   formatFreqSmart(uiDisplayFreqHz(), fbuf, sizeof(fbuf));
   // Trim text if longer than panel width
   char hdr[96];
-  snprintf(hdr, sizeof(hdr), " RP2040 VFO | %s | %s ", fbuf, (sts ? "TX" : "RX"));
+  snprintf(hdr, sizeof(hdr), " RP2040 VFO + VFO Scanner | %s | Mode: %s ", fbuf, (sts ? "TX" : "RX"));
   size_t len = strlen(hdr);
   if (len > tuiPanelW) hdr[tuiPanelW] = '\0';
   s.print(hdr);
@@ -333,11 +333,12 @@ static void drawScanRow(Stream& s) {
   size_t idx = uiScanIdx;
   if (idx >= len && len > 0) idx = len - 1;
   char line[128];
-  snprintf(line, sizeof(line), " Scan:%s Src:%s Len:%lu Idx:%lu ",
+  snprintf(line, sizeof(line), " Scan:%s Source:%s Length:%lu Index:%lu Delay:%lu ",
            uiScanOn ? "ON" : "OFF",
            uiScanSrc ? "CUSTOM" : "HARD",
            (unsigned long)len,
-           (unsigned long)idx);
+           (unsigned long)idx,
+           (unsigned long)uiScanDelayMs);
   // Trim
   if (strlen(line) > tuiPanelW) line[tuiPanelW] = '\0';
   s.print(line);
@@ -493,7 +494,7 @@ static void tuiRedrawFull() {
   vtClear(Serial);
   drawHeader(Serial);
   drawScanRow(Serial);
-  drawFreqBlock(Serial);
+  //drawFreqBlock(Serial);
   drawBars(Serial);
   drawLog(Serial);
   drawInput(Serial);  // sets caret position
@@ -507,7 +508,7 @@ static void tuiRedrawDynamic() {
   // No vtClear here; dynamic should be partial updates only
   drawHeader(Serial);
   drawScanRow(Serial);
-  drawFreqBlock(Serial);
+  //drawFreqBlock(Serial);
   drawBars(Serial);
   drawLog(Serial);
   drawInput(Serial);  // sets caret position
@@ -528,7 +529,7 @@ static void tuiRedrawDirty() {
     vtClear(Serial);
     drawHeader(Serial);
     drawScanRow(Serial);
-    drawFreqBlock(Serial);
+    //drawFreqBlock(Serial);
     drawBars(Serial);
     drawLog(Serial);
     drawInput(Serial);
@@ -545,10 +546,10 @@ static void tuiRedrawDirty() {
     drawScanRow(Serial);
     tuiDirtyClear(TUI_DIRTY_SCAN);
   }
-  if (tuiDirtyMask & TUI_DIRTY_FREQ) {
+  /*if (tuiDirtyMask & TUI_DIRTY_FREQ) {
     drawFreqBlock(Serial);
     tuiDirtyClear(TUI_DIRTY_FREQ);
-  }
+  }*/
   if (tuiDirtyMask & TUI_DIRTY_BARS) {
     drawBars(Serial);
     tuiDirtyClear(TUI_DIRTY_BARS);
@@ -1278,8 +1279,9 @@ void handleCommand(const char* line, Stream& io) {
   }
 
   // ==================== Unknown ====================
-  if (tuiEnabled) tuiLogf("RP2040Zero: Unknown cmd: %s\n", line);
-  else {
+  if (tuiEnabled) {
+    tuiLogf("RP2040Zero: Unknown cmd: %s\n", line);
+  } else {
     sPrintf(Serial, "RP2040Zero: Unknown cmd: %s\n", line);
     termPrompt();
   }
