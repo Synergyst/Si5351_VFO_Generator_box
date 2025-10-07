@@ -3,6 +3,8 @@
 #include <si5351.h>             // Etherkit https://github.com/etherkit/Si5351Arduino
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
+#include <stdarg.h>
+#include <string.h>
 
 // ==================== Defines ====================
 #define IF 10700           // Inter-Frequency in kHz
@@ -50,7 +52,7 @@ static size_t sUsbLen = 0;             // USB serial pending buffer input length
 static const size_t UI_MAX_CUSTOM_SCAN = 255;  // Max custom scan list length
 static bool uiScanOn = false;                  // Scanner off initially
 static uint8_t uiScanSrc = 0;                  // 0 = hard list, 1 = custom list
-static uint32_t uiScanDelayMs = 100;           // per-step delay (ms)
+static uint32_t uiScanDelayMs = 250;           // per-step delay (ms)
 static uint32_t uiScanLastMs = 0;              // Last scan cycle in milliseconds
 static size_t uiScanIdx = 0;                   // Current list index
 static uint32_t uiScanCurrFreqHz = 0;          // Current scanner frequency in Hertz
@@ -139,8 +141,396 @@ inline void pollEncoder() {
   encPrev = curr;
 }
 
-// ==================== Improved terminal line reader ====================
+// TUI
+// ==================== Small printf helper for Streams ====================
+static void sPrintf(Stream& s, const char* fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  s.write((const uint8_t*)buf, strlen(buf));
+}
+// ==================== Terminal TUI ====================
+static bool tuiEnabled = false;    // TUI master switch
+static bool tuiAnsi = true;        // ANSI sequences allowed
+static bool tuiInAlt = false;      // in alternate screen
+static bool tuiDirtyFull = false;  // needs full redraw
+static bool tuiDirtyDyn = false;   // needs dynamic-only update
+static unsigned long tuiLastDraw = 0;
+static uint16_t tuiRows = 24;             // terminal rows (default)
+static uint16_t tuiCols = 80;             // terminal cols (default)
+static uint16_t tuiLogTop = 12;           // computed based on layout
+static uint16_t tuiLogBottom = (24 - 2);  // last row used by log pane (rows-2)
+static uint16_t tuiInputRow = 24;         // input row (bottom)
+// Disable echo in readLine so TUI can render the input itself
+static bool gTermNoEcho = false;
+// Simple VT100 helpers
+static void vt(Stream& s, const char* seq) {
+  if (tuiAnsi) s.print(seq);
+}
+static void vtAltOn(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[?1049h");
+}
+static void vtAltOff(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[?1049l");
+}
+static void vtClear(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[2J\x1B[H");
+}
+static void vtHideCur(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[?25l");
+}
+static void vtShowCur(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[?25h");
+}
+static void vtMove(Stream& s, uint16_t r, uint16_t c) {
+  if (!tuiAnsi) return;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1B[%u;%uH", (unsigned)r, (unsigned)c);
+  s.print(buf);
+}
+static void vtClrEol(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[K");
+}
+static void vtRevOn(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[7m");
+}
+static void vtRevOff(Stream& s) {
+  if (tuiAnsi) s.print("\x1B[27m");
+}
+// ========= Log pane (ring buffer) =========
+static const size_t TUI_LOG_MAX = 200;
+static const size_t TUI_LINE_MAX = 240;
+static char tuiLog[TUI_LOG_MAX][TUI_LINE_MAX];
+static size_t tuiLogHead = 0;  // next write
+static size_t tuiLogCount = 0;
+static void tuiLogLine(const char* line) {
+  if (!line) return;
+  strncpy(tuiLog[tuiLogHead], line, TUI_LINE_MAX - 1);
+  tuiLog[tuiLogHead][TUI_LINE_MAX - 1] = '\0';
+  tuiLogHead = (tuiLogHead + 1) % TUI_LOG_MAX;
+  if (tuiLogCount < TUI_LOG_MAX) tuiLogCount++;
+  tuiDirtyDyn = true;
+}
+static void tuiLogf(const char* fmt, ...) {
+  char tmp[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(tmp, sizeof(tmp), fmt, ap);
+  va_end(ap);
+
+  // Visible width for wrapping (leave small margin)
+  const uint16_t visCols = (tuiCols >= 4) ? (tuiCols - 2) : tuiCols;
+
+  const char* p = tmp;
+  while (*p) {
+    const char* nl = strchr(p, '\n');  // FIX: pointer type
+    size_t segLen = nl ? (size_t)(nl - p) : strlen(p);
+
+    // wrap the segment to visible width
+    size_t off = 0;
+    while (off < segLen) {
+      size_t take = segLen - off;
+      if (take > visCols) take = visCols;
+
+      char line[TUI_LINE_MAX];
+      size_t copy = (take < sizeof(line) - 1) ? take : (sizeof(line) - 1);
+      memcpy(line, p + off, copy);
+      line[copy] = '\0';
+      tuiLogLine(line);
+      off += take;
+    }
+
+    if (!nl) break;                   // no more newlines
+    if (segLen == 0) tuiLogLine("");  // preserve blank line on lone '\n'
+    p = nl + 1;                       // FIX: advance pointer correctly
+  }
+}
+// ========= TUI draw helpers =========
+static void tuiComputeRows() {
+  tuiInputRow = tuiRows;
+  tuiLogBottom = (tuiRows >= 2) ? (tuiRows - 2) : tuiRows;
+  tuiLogTop = (tuiRows >= 12) ? 12 : (tuiRows / 2);
+}
+static const char* stepToStr() {
+  switch (stp) {
+    case 2: return "1 Hz";
+    case 3: return "10 Hz";
+    case 4: return "1 kHz";
+    case 5: return "5 kHz";
+    case 6: return "10 kHz";
+    case 7: return "100 kHz";
+    case 8: return "1 MHz";
+    case 1: return "10 MHz";
+    default: return "?";
+  }
+}
+static void drawHeader(Stream& s) {
+  vtMove(s, 1, 1);
+  vtRevOn(s);
+  char fbuf[32];
+  formatFreqSmart(uiDisplayFreqHz(), fbuf, sizeof(fbuf));
+  sPrintf(s, " RP2040Zero VFO | FREQ: %s | %s | IF: %lu kHz | STEP: %s ",
+          fbuf, (sts ? "TX" : "RX"), (unsigned long)interfreq, stepToStr());
+  vtClrEol(s);
+  vtRevOff(s);
+}
+static void drawScanRow(Stream& s) {
+  vtMove(s, 2, 1);
+  // Build a simple progress bar-ish indicator
+  const size_t len = uiCurrentListLen();
+  size_t idx = uiScanIdx;
+  if (idx >= len && len > 0) idx = len - 1;
+  sPrintf(s, " Scan: %s | Source: %s | Delay: %lu ms | Len: %lu | Index: %lu ",
+          uiScanOn ? "ON" : "OFF",
+          uiScanSrc ? "CUSTOM" : "HARD",
+          (unsigned long)uiScanDelayMs,
+          (unsigned long)len,
+          (unsigned long)idx);
+  vtClrEol(s);
+}
+static void drawFreqBlock(Stream& s) {
+  // Large-ish frequency line
+  vtMove(s, 4, 2);
+  char fbuf[64];
+  unsigned long df = uiDisplayFreqHz();
+  unsigned int m = df / 1000000UL;
+  unsigned int k = (df % 1000000UL) / 1000UL;
+  unsigned int h = (df % 1000UL);
+  char big[64];
+  if (m < 1) {
+    snprintf(big, sizeof(big), "%03u.%03u kHz", k, h);
+  } else if (m < 100) {
+    snprintf(big, sizeof(big), "%2u.%03u.%03u MHz", m, k, h);
+  } else {
+    unsigned int h2 = (df % 1000UL) / 10UL;
+    snprintf(big, sizeof(big), "%2u.%03u.%02u MHz", m, k, h2);
+  }
+  vtRevOn(s);
+  sPrintf(s, " %s ", big);
+  vtRevOff(s);
+  vtClrEol(s);
+
+  vtMove(s, 6, 2);
+  sPrintf(s, "Band: ");
+  switch (count) {
+    case 1: s.print("GEN"); break;
+    case 2: s.print("MW"); break;
+    case 3: s.print("160m"); break;
+    case 4: s.print("80m"); break;
+    case 5: s.print("60m"); break;
+    case 6: s.print("49m"); break;
+    case 7: s.print("40m"); break;
+    case 8: s.print("31m"); break;
+    case 9: s.print("25m"); break;
+    case 10: s.print("22m"); break;
+    case 11: s.print("20m"); break;
+    case 12: s.print("19m"); break;
+    case 13: s.print("16m"); break;
+    case 14: s.print("13m"); break;
+    case 15: s.print("11m"); break;
+    case 16: s.print("10m"); break;
+    case 17: s.print("6m"); break;
+    case 18: s.print("WFM"); break;
+    case 19: s.print("AIR"); break;
+    case 20: s.print("2m"); break;
+    case 21: s.print("1m"); break;
+    default: s.print("?"); break;
+  }
+  vtClrEol(s);
+}
+static void drawBars(Stream& s) {
+  // TU bar (n mapped 1..42 -> 1..14)
+  byte tu = map(n, 1, 42, 1, 14);
+  vtMove(s, 8, 2);
+  s.print("TU ");
+  for (int i = 1; i <= 14; ++i) s.print(i <= tu ? '|' : '.');
+  vtClrEol(s);
+  // SM bar (x 1..14)
+  vtMove(s, 9, 2);
+  s.print("SM ");
+  for (int i = 1; i <= 14; ++i) s.print(i <= x ? '|' : '.');
+  vtClrEol(s);
+}
+static void drawLog(Stream& s) {
+  // Frame for log
+  vtMove(s, tuiLogTop - 1, 1);
+  vtClrEol(s);
+  s.print(" Console:");
+  vtClrEol(s);
+  // Lines visible
+  const uint16_t visRows = (tuiLogBottom >= tuiLogTop) ? (tuiLogBottom - tuiLogTop + 1) : 0;
+  size_t start = (tuiLogCount > visRows) ? (tuiLogHead + TUI_LOG_MAX + (tuiLogCount - visRows)) % TUI_LOG_MAX
+                                         : (tuiLogHead + TUI_LOG_MAX - tuiLogCount) % TUI_LOG_MAX;
+  for (uint16_t r = 0; r < visRows; ++r) {
+    size_t idx = (start + r) % TUI_LOG_MAX;
+    vtMove(s, tuiLogTop + r, 1);
+    vtClrEol(s);
+    if (r < tuiLogCount) {
+      // indent two spaces
+      s.print(" ");
+      s.print(tuiLog[idx]);
+    }
+  }
+}
+static void drawInput(Stream& s) {
+  vtMove(s, tuiInputRow, 1);
+  vtClrEol(s);
+  s.print("> ");
+  // mirror current input buffer
+  size_t showLen = sUsbLen;
+  if (showLen > (tuiCols - 3)) showLen = tuiCols - 3;
+  for (size_t i = 0; i < showLen; ++i) s.write((uint8_t)sUsbBuf[i]);
+  // put cursor at end
+  vtMove(s, tuiInputRow, 3 + showLen);
+}
+static void tuiEnter() {
+  if (!tuiAnsi) return;  // refuse to enter without ANSI
+  if (tuiInAlt) return;
+  vtAltOn(Serial);
+  vtClear(Serial);
+  vtHideCur(Serial);
+  tuiInAlt = true;
+  tuiComputeRows();
+  tuiDirtyFull = true;
+}
+static void tuiExit() {
+  if (!tuiInAlt) return;
+  vtShowCur(Serial);
+  vtAltOff(Serial);
+  tuiInAlt = false;
+}
+static void tuiSetEnabled(bool on) {
+  if (on == tuiEnabled) return;
+  tuiEnabled = on;
+  gTermNoEcho = tuiEnabled;
+  if (tuiEnabled) {
+    tuiEnter();
+    tuiLogf("TUI enabled (%ux%u).", (unsigned)tuiRows, (unsigned)tuiCols);
+  } else {
+    tuiExit();
+  }
+}
+static void tuiRedrawFull() {
+  if (!tuiEnabled) return;
+  vtClear(Serial);
+  drawHeader(Serial);
+  drawScanRow(Serial);
+  drawFreqBlock(Serial);
+  drawBars(Serial);
+  drawLog(Serial);
+  drawInput(Serial);
+  vtShowCur(Serial);
+  tuiDirtyFull = false;
+  tuiDirtyDyn = false;
+}
+static void tuiRedrawDynamic() {
+  if (!tuiEnabled) return;
+  drawHeader(Serial);
+  drawScanRow(Serial);
+  drawFreqBlock(Serial);
+  drawBars(Serial);
+  drawLog(Serial);
+  drawInput(Serial);
+  vtShowCur(Serial);
+  tuiDirtyDyn = false;
+}
+static void tuiMarkDirty() {
+  tuiDirtyDyn = true;
+}
+static void tuiTick() {
+  if (!tuiEnabled) return;
+  const unsigned long now = millis();
+  const unsigned long period = 150;
+  if (tuiDirtyFull) {
+    tuiRedrawFull();
+    tuiLastDraw = now;
+    return;
+  }
+  if ((now - tuiLastDraw) >= period || tuiDirtyDyn) {
+    tuiRedrawDynamic();
+    tuiLastDraw = now;
+  }
+}
+
+// ==================== Improved terminal line reader (echo-aware) ====================
 static inline bool isPrintableAscii(char c) {
+  return c >= 0x20 && c <= 0x7E;
+}
+static void termEraseChars(Stream& s, size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    s.write('\b');
+    s.write(' ');
+    s.write('\b');
+  }
+}
+bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
+  while (s.available()) {
+    char c = (char)s.read();
+    if (c == '\n' || c == '\r') {
+      if (c == '\r' && s.peek() == '\n') (void)s.read();
+      size_t useLen = inoutLen;
+      if (useLen >= outSz) useLen = outSz - 1;
+      outBuf[useLen] = '\0';
+      if (!gTermNoEcho) {
+        s.write('\r');
+        s.write('\n');
+      }
+      inoutLen = 0;
+      return true;
+    }
+    if (c == 0x08 || c == 0x7F) {
+      if (inoutLen > 0) {
+        inoutLen--;
+        if (!gTermNoEcho) termEraseChars(s, 1);
+      } else {
+        if (!gTermNoEcho) s.write('\a');
+      }
+      continue;
+    }
+    if (c == 0x15) {  // Ctrl-U
+      if (!gTermNoEcho && inoutLen > 0) termEraseChars(s, inoutLen);
+      inoutLen = 0;
+      continue;
+    }
+    if (c == 0x17) {  // Ctrl-W
+      if (inoutLen > 0) {
+        size_t i = inoutLen;
+        while (i > 0 && outBuf[i - 1] == ' ') i--;
+        while (i > 0 && outBuf[i - 1] != ' ') i--;
+        size_t toErase = inoutLen - i;
+        inoutLen = i;
+        if (!gTermNoEcho && toErase > 0) termEraseChars(s, toErase);
+      }
+      continue;
+    }
+    if (c == 0x03) {  // Ctrl-C
+      if (!gTermNoEcho) {
+        s.write('^');
+        s.write('C');
+        s.write('\r');
+        s.write('\n');
+      }
+      outBuf[0] = '\0';
+      inoutLen = 0;
+      return true;
+    }
+    if (c == '\t') c = ' ';
+    if (isPrintableAscii(c)) {
+      if (inoutLen < (outSz - 1)) {
+        outBuf[inoutLen++] = c;
+        if (!gTermNoEcho) s.write((uint8_t)c);
+      } else {
+        if (!gTermNoEcho) s.write('\a');
+      }
+    }
+  }
+  return false;
+}
+
+// ==================== Improved terminal line reader ====================
+/*static inline bool isPrintableAscii(char c) {
   return c >= 0x20 && c <= 0x7E;
 }
 static void termEraseChars(Stream& s, size_t n) {
@@ -246,7 +636,7 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
     // All other control chars ignored
   }
   return false;
-}
+}*/
 
 // ==================== Boot Animations ====================
 static inline float easeOutCubic(float t) {
@@ -466,7 +856,402 @@ void sendHelpRP() {
   Serial.println("  Ctrl-W                - delete previous word");
   Serial.println("  Ctrl-C                - cancel current line");
 }
+// Optional: richer help that can write to any Stream or to TUI log
+static void sendHelpTo(Stream& out) {
+  out.println("RP2040Zero Help:");
+  out.println("General:");
+  out.println("  HELP | ? | H          - show this help");
+  out.println();
+  out.println("HW:");
+  out.println("  BOOTSEL               - reboot to UF2 bootloader");
+  out.println("  I2C?                  - scan I2C bus and print devices");
+  out.println();
+  out.println("Unimplemented HW buttons:");
+  out.println("  SETSTEP               - set rotary knob step count");
+  out.println("  INCBAND               - increment band preset");
+  out.println();
+  out.println("Tuning/state:");
+  out.println("  FREQ?                 - query current frequency");
+  out.println("  FREQ <Hz>             - set frequency (10 kHz .. 225 MHz)");
+  out.println("  IF <kHz>              - set IF in kHz (0 .. 200000)");
+  out.println("  SIGMETER <1..14>      - set S-meter bucket");
+  out.println();
+  out.println("Scanning:");
+  out.println("  SCAN START            - start scanning current list");
+  out.println("  SCAN STOP             - stop scanning");
+  out.println("  SCAN?                 - show scanner status");
+  out.println("  SCAN SRC HARD         - use hard-coded list (default: CB 40-ch)");
+  out.println("  SCAN SRC CUSTOM       - use custom list");
+  out.println("  SCAN DELAY <ms>       - set per-step delay (20..10000 ms)");
+  out.println("  SCAN ADD <Hz>         - add a frequency to custom list");
+  out.println("  SCAN CLEAR            - clear custom list");
+  out.println("  SCAN LIST?            - show current scan list");
+  out.println();
+  out.println("Terminal UI:");
+  out.println("  TTY ON                - enable terminal UI (ANSI/VT100)");
+  out.println("  TTY OFF               - disable terminal UI");
+  out.println("  TTY?                  - show TTY status");
+  out.println("  TTY ANSI ON|OFF       - enable/disable ANSI usage");
+  out.println("  TTY REDRAW            - force full redraw");
+  out.println("  TTY SIZE <rows> <cols>- set terminal rows/cols (for layout)");
+  out.println();
+  out.println("Console editing:");
+  out.println("  Enter (CR/LF)         - submit line");
+  out.println("  Backspace/Delete      - erase last character");
+  out.println("  Ctrl-U                - clear entire line");
+  out.println("  Ctrl-W                - delete previous word");
+  out.println("  Ctrl-C                - cancel current line");
+}
+// Existing sendHelpRP can remain; we’ll prefer sendHelpTo so help appears inside TUI log when active.
+static void sendScanStatus(Stream& io) {
+  const size_t len = uiCurrentListLen();
+  char buf[32];
+  formatFreqSmart(uiScanCurrFreqHz, buf, sizeof(buf));
+  io.printf("Scan: %s\n", uiScanOn ? "ON" : "OFF");
+  io.printf("  Source: %s\n", uiScanSrc ? "CUSTOM" : "HARD");
+  io.printf("  Delay: %lu ms\n", (unsigned long)uiScanDelayMs);
+  io.printf("  Length: %lu\n", (unsigned long)len);
+  io.printf("  Index: %lu\n", (unsigned long)uiScanIdx);
+  if (uiScanOn) io.printf("  Current: %lu Hz (%s)\n", (unsigned long)uiScanCurrFreqHz, buf);
+}
+// Helper: show prompt in plain mode
+static void termPrompt() {
+  if (!tuiEnabled) sPrintf(Serial, "\r> ");
+}
 void handleCommand(const char* line, Stream& io) {
+  if (line[0] == '\0') return;
+  const bool fromUSB = (&io == &Serial);
+
+  // When TUI is ON, route printed outputs to the log instead of raw terminal
+  // (we still do some sPrintf to Serial for critical actions or if TUI is OFF)
+  auto outLine = [&](const char* s) {
+    if (tuiEnabled) tuiLogf("%s", s);
+    else sPrintf(Serial, "%s\n", s);
+  };
+  auto outPrintf = [&](const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (tuiEnabled) tuiLogf("%s", buf);
+    else sPrintf(Serial, "%s", buf);
+  };
+
+  // ==================== Boot to bootloader ====================
+  if (!strcmp(line, "BOOTSEL") && fromUSB) {
+    outLine("Rebooting to bootloader now!");
+    delay(100);
+    rp2040.rebootToBootloader();
+    return;
+  }
+  // ==================== Cycle to next step size preset ====================
+  if (!strcmp(line, "SETSTEP") && fromUSB) {
+    time_now = (millis() + 300);
+    setstep();
+    delay(300);
+    termPrompt();
+    tuiMarkDirty();
+    return;
+  }
+  // ==================== Cycle to next band preset ====================
+  if (!strcmp(line, "INCBAND") && fromUSB) {
+    time_now = (millis() + 300);
+    inc_preset();
+    delay(300);
+    termPrompt();
+    tuiMarkDirty();
+    return;
+  }
+  // ==================== Return the current frequency ====================
+  if (!strcmp(line, "FREQ?") && fromUSB) {
+    char buf[32];
+    formatFreqSmart(freq, buf, sizeof(buf));
+    outPrintf("RP2040Zero: tuned to: %lu Hz (%s)\n", (unsigned long)freq, buf);
+    time_now = millis();
+    termPrompt();
+    tuiMarkDirty();
+    return;
+  }
+  // ==================== I2C device scanner ====================
+  if (!strcmp(line, "I2C?") && fromUSB) {
+    for (uint8_t addr = 1; addr < 127; addr++) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        outPrintf("RP2040Zero (boot): Detected I2C device on bus: 0x%02X\n", addr);
+      }
+    }
+    time_now = millis();
+    termPrompt();
+    tuiMarkDirty();
+    return;
+  }
+
+  // ==================== TTY commands (Terminal UI) ====================
+  if (fromUSB) {
+    if (!strcmp(line, "TTY ON")) {
+      tuiSetEnabled(true);
+      termPrompt();
+      return;
+    }
+    if (!strcmp(line, "TTY OFF")) {
+      tuiSetEnabled(false);
+      sPrintf(Serial, "\nTUI disabled.\n");
+      termPrompt();
+      return;
+    }
+    if (!strcmp(line, "TTY REDRAW")) {
+      tuiDirtyFull = true;
+      termPrompt();
+      return;
+    }
+    if (!strcmp(line, "TTY?")) {
+      outPrintf("TTY: %s, ANSI: %s, size=%ux%u\n",
+                tuiEnabled ? "ON" : "OFF",
+                tuiAnsi ? "ON" : "OFF",
+                (unsigned)tuiRows, (unsigned)tuiCols);
+      termPrompt();
+      return;
+    }
+    if (!strcmp(line, "TTY ANSI ON")) {
+      tuiAnsi = true;
+      if (tuiEnabled) {
+        tuiExit();
+        tuiEnter();
+      }
+      termPrompt();
+      return;
+    }
+    if (!strcmp(line, "TTY ANSI OFF")) {
+      if (tuiEnabled) tuiSetEnabled(false);
+      tuiAnsi = false;
+      outLine("ANSI disabled. Use TTY ANSI ON then TTY ON to re-enable UI.");
+      termPrompt();
+      return;
+    }
+    // TTY SIZE <rows> <cols>
+    {
+      unsigned r = 0, c = 0;
+      if (sscanf(line, "TTY SIZE %u %u", &r, &c) == 2) {
+        if (r >= 12 && r <= 80 && c >= 40 && c <= 200) {
+          tuiRows = r;
+          tuiCols = c;
+          tuiComputeRows();
+          tuiDirtyFull = true;
+          outPrintf("TTY size set to %ux%u\n", tuiRows, tuiCols);
+        } else {
+          outLine("TTY SIZE out of range (rows 12..80, cols 40..200)");
+        }
+        termPrompt();
+        return;
+      }
+    }
+  }
+
+  // ==================== Scanner commands ====================
+  if (fromUSB) {
+    if (!strcmp(line, "SCAN?")) {
+      // Write to TUI log or Serial depending on mode
+      if (tuiEnabled) {
+        // Build status into a buffer and log it
+        char tmp[256];
+        char fbuf[32];
+        formatFreqSmart(uiScanCurrFreqHz, fbuf, sizeof(fbuf));
+        size_t len = uiCurrentListLen();
+        snprintf(tmp, sizeof(tmp),
+                 "Scan: %s\n  Source: %s\n  Delay: %lu ms\n  Length: %lu\n  Index: %lu\n  Current: %lu Hz (%s)\n",
+                 uiScanOn ? "ON" : "OFF",
+                 uiScanSrc ? "CUSTOM" : "HARD",
+                 (unsigned long)uiScanDelayMs,
+                 (unsigned long)len,
+                 (unsigned long)uiScanIdx,
+                 (unsigned long)uiScanCurrFreqHz, fbuf);
+        tuiLogf("%s", tmp);
+      } else {
+        sendScanStatus(Serial);
+      }
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+    if (!strcmp(line, "SCAN START")) {
+      if (uiCurrentListLen() == 0) {
+        outLine("Scan: no entries in current list");
+      } else {
+        uiScanStart();
+        outLine("Scan: started");
+      }
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+    if (!strcmp(line, "SCAN STOP")) {
+      uiScanStop();
+      outLine("Scan: stopped");
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+    if (!strcmp(line, "SCAN SRC HARD")) {
+      uiScanUse(0);
+      outLine("Scan: source = HARD");
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+    if (!strcmp(line, "SCAN SRC CUSTOM")) {
+      if (uiCustomScanLen == 0) {
+        outLine("Scan: CUSTOM list empty (use: SCAN ADD <Hz>)");
+      } else {
+        uiScanUse(1);
+        outLine("Scan: source = CUSTOM");
+      }
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+    {
+      unsigned long ms = 0;
+      if (sscanf(line, "SCAN DELAY %lu", &ms) == 1) {
+        if (ms < 20) ms = 20;
+        if (ms > 10000UL) ms = 10000UL;
+        uiScanDelayMs = (uint32_t)ms;
+        outPrintf("Scan: delay = %lu ms\n", (unsigned long)uiScanDelayMs);
+        termPrompt();
+        tuiMarkDirty();
+        return;
+      }
+    }
+    {
+      unsigned long hz = 0;
+      if (sscanf(line, "SCAN ADD %lu", &hz) == 1) {
+        if (hz < 10000UL) hz = 10000UL;
+        if (hz > 225000000UL) hz = 225000000UL;
+        if (uiCustomScanLen >= UI_MAX_CUSTOM_SCAN) {
+          outPrintf("Scan: custom list full (%lu max)\n", (unsigned long)UI_MAX_CUSTOM_SCAN);
+        } else {
+          uiCustomScanList[uiCustomScanLen++] = (uint32_t)hz;
+          char buf[32];
+          formatFreqSmart((uint32_t)hz, buf, sizeof(buf));
+          outPrintf("Scan: added %lu Hz (%s), custom len=%lu\n",
+                    (unsigned long)hz, buf, (unsigned long)uiCustomScanLen);
+        }
+        termPrompt();
+        tuiMarkDirty();
+        return;
+      }
+    }
+    if (!strcmp(line, "SCAN CLEAR")) {
+      uiCustomScanLen = 0;
+      if (uiScanSrc == 1) {
+        uiScanStop();
+        uiScanUse(0);
+      }
+      outLine("Scan: custom list cleared");
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+    if (!strcmp(line, "SCAN LIST?")) {
+      const uint32_t* list = uiCurrentListPtr();
+      const size_t len = uiCurrentListLen();
+      outPrintf("Scan list (%s), len=%lu\n", uiScanSrc ? "CUSTOM" : "HARD", (unsigned long)len);
+      for (size_t i = 0; i < len; ++i) {
+        char buf[32];
+        formatFreqSmart(list[i], buf, sizeof(buf));
+        outPrintf("  [%lu] %lu Hz (%s)\n", (unsigned long)i, (unsigned long)list[i], buf);
+      }
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+  }
+
+  // ==================== Help ====================
+  if ((!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H")) && fromUSB) {
+    if (tuiEnabled) {
+      // write help into log
+      // simple adapter to Stream -> TUI
+      struct LogStream : public Stream {
+        size_t write(uint8_t c) override {
+          char b[2] = { (char)c, 0 };
+          tuiLogf("%s", b);
+          return 1;
+        }
+        size_t write(const uint8_t* b, size_t n) override {
+          char tmp[256];
+          while (n) {
+            size_t take = n;
+            if (take > sizeof(tmp) - 1) take = sizeof(tmp) - 1;
+            memcpy(tmp, b, take);
+            tmp[take] = 0;
+            tuiLogf("%s", tmp);
+            b += take;
+            n -= take;
+          }
+          return 1;
+        }
+        int available() override {
+          return 0;
+        }
+        int read() override {
+          return -1;
+        }
+        int peek() override {
+          return -1;
+        }
+      } ls;
+      sendHelpTo(ls);
+    } else {
+      sendHelpTo(Serial);
+    }
+    Serial.println();
+    termPrompt();
+    tuiMarkDirty();
+    return;
+  }
+
+  // ==================== KEY [VALUE] numeric ====================
+  char key[8] = { 0 };
+  long val = 0;
+  int matched = sscanf(line, "%7s %ld", key, &val);
+  if (matched >= 1 && fromUSB) {
+    if (!strcmp(key, "FREQ") && matched == 2) {
+      if (val < 10000) val = 10000;
+      if ((unsigned long)val > 225000000UL) val = 225000000UL;
+      freq = (unsigned long)val;
+      time_now = millis();
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    } else if (!strcmp(key, "IF") && matched == 2) {
+      if (val < 0) val = 0;
+      if (val > 200000) val = 200000;
+      interfreq = val;
+      time_now = millis();
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    } else if (!strcmp(key, "SIGMETER") && matched == 2) {
+      if (val < 1) val = 1;
+      if (val > 14) val = 14;
+      x = (byte)val;
+      time_now = millis();
+      termPrompt();
+      tuiMarkDirty();
+      return;
+    }
+  }
+
+  // ==================== Unknown ====================
+  if (tuiEnabled) tuiLogf("RP2040Zero: Unknown cmd: %s\n", line);
+  else {
+    sPrintf(Serial, "RP2040Zero: Unknown cmd: %s\n", line);
+    termPrompt();
+  }
+  tuiMarkDirty();
+}
+/*void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;  // Return if termination is first-in char
 
   const bool fromUSB = (&io == &Serial);  // Is our IO stream is from the USB serial
@@ -667,7 +1452,7 @@ void handleCommand(const char* line, Stream& io) {
   Serial.printf("RP2040Zero: Unknown cmd: ");
   Serial.println(line);
   Serial.printf("\r> ");
-}
+}*/
 
 // ==================== Setup ====================
 void setup() {
@@ -679,7 +1464,7 @@ void setup() {
   } else {
     delay(3000);
   }
-  Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.4");
+  Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.5");
   Serial.println("RP2040Zero (boot): Starting now..");
 
   // ==================== Rotary init ====================
@@ -754,7 +1539,6 @@ void setup() {
   strip.show();
   Serial.print("RP2040Zero (boot): Running loop now..\n\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
 }
-
 // ==================== Loop ====================
 void loop() {
   // ==================== Pass USB serial data into our command handler ====================
@@ -764,12 +1548,14 @@ void loop() {
 
   pollEncoder();  // ==================== Rotary encoder polling ====================
   uiScanTick();   // ==================== Scanner tick ====================
+  tuiTick();
 
   // ==================== Frequency changed, retune now ====================
   if (freqold != freq) {
     time_now = millis();
     tunegen();
     freqold = freq;
+    tuiMarkDirty();  // reflect changes to TUI
   }
 
   // ==================== Inter-Frequency changed, retune now ====================
@@ -780,12 +1566,14 @@ void loop() {
     }
     tunegen();  // early-returns when uiScanOn
     interfreqold = interfreq;
+    tuiMarkDirty();  // reflect changes to TUI
   }
 
   // ==================== ??? changed, ??? now ====================
   if (xo != x) {
     time_now = millis();
     xo = x;
+    tuiMarkDirty();  // reflect changes to TUI
   }
 
   // ==================== Limit display ticks ====================
