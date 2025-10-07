@@ -5,17 +5,17 @@
 #include <math.h>               // Standard math library
 
 // ==================== Defines ====================
-#define IF 10700  // IF in kHz
-#define BAND_INIT 18
-#define XT_CAL_F 0
-#define S_GAIN 505
-#define BAUD 9600
-
-#define rotLeft 6   // The pin used by rotary-left input.
-#define rotRight 7  // The pin used by rotary-right input.
-
-#define LED_PIN 16  // WS2812 LED
-#define LED_COUNT 1
+#define IF 10700           // Inter-Frequency in kHz
+#define BAND_INIT 18       // Initial band preset
+#define STEP_INIT 6        // Initial step size preset
+#define XT_CAL_F 0         // XTAL ppm drift calibration amount
+#define S_GAIN 505         //
+#define BAUD 9600          // USB serial baud rate
+#define rotLeft 6          // Rotary-left pin
+#define rotRight 7         // Rotary-right pin
+#define LED_PIN 16         // WS2812 LED
+#define LED_COUNT 1        // The WaveShare RP2040 Zero only has the one LED
+#define WAIT_USB_SERIAL 0  // Wait for a client to connect to USB serial connsole
 
 // ==================== Tuner variables ====================
 unsigned long freq, freqold, fstep;
@@ -30,13 +30,6 @@ bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
 
-// ==================== I2C devices ====================
-Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);
-Si5351 si5351(0x60);
-
-// ==================== WS2812 LED ====================
-Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
-
 // ==================== Encoder state ====================
 static uint8_t encPrev = 0;
 static int8_t encAccum = 0;
@@ -48,18 +41,19 @@ static const int8_t encTable[16] = {
 };
 
 // ==================== Line Reader ====================-
-static const size_t CMD_BUF_SZ = 255;
-static char sUsbBuf[CMD_BUF_SZ];
-static size_t sUsbLen = 0;
+static const size_t CMD_BUF_SZ = 255;  // USB serial buffer length
+static char sUsbBuf[CMD_BUF_SZ];       // USB serial buffer
+static size_t sUsbLen = 0;             // USB serial pending buffer input length
 
 // ==================== UI scanner ====================
-static bool uiScanOn = false;
-static uint8_t uiScanSrc = 0;          // 0 = hard list, 1 = custom list
-static uint32_t uiScanDelayMs = 5000;  // per-step delay (ms)
-static uint32_t uiScanLastMs = 0;
-static size_t uiScanIdx = 0;
-static uint32_t uiScanCurrFreqHz = 0;
-static bool uiScanPending = false;
+static const size_t UI_MAX_CUSTOM_SCAN = 255;  // Max custom scan list length
+static bool uiScanOn = false;                  // Scanner off initially
+static uint8_t uiScanSrc = 0;                  // 0 = hard list, 1 = custom list
+static uint32_t uiScanDelayMs = 5000;          // per-step delay (ms)
+static uint32_t uiScanLastMs = 0;              // Last scan cycle in milliseconds
+static size_t uiScanIdx = 0;                   // Current list index
+static uint32_t uiScanCurrFreqHz = 0;          // Current scanner frequency in Hertz
+static size_t uiCustomScanLen = 0;             // Length of custom scan list
 static const uint32_t uiHardScanList[] PROGMEM = {
   96300000UL,   // 96.3 MHz -
   102500000UL,  // 102.5 MHz -
@@ -69,10 +63,15 @@ static const uint32_t uiHardScanList[] PROGMEM = {
   107700000UL,  // 107.7 MHz -
   162550000UL   // 162.550 MHz - NOAA WX Ch 7
 };
-static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);
-static const size_t UI_MAX_CUSTOM_SCAN = 255;
-static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];
-static size_t uiCustomScanLen = 0;
+static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);  // Hard scan list length
+static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                    // Custom scanner list
+
+// ==================== I2C devices ====================
+Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);  // SSD1306 OLED mono display (128x64 resolution)
+Si5351 si5351(0x60);                                          // Si531 programmable clock generator
+
+// ==================== WS2812 LED ====================
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);  // WS2812 LED on WaveShare RP2040 Zero PCB
 
 // ==================== Rotary Encoder ====================
 inline void pollEncoder() {
@@ -97,12 +96,6 @@ inline void pollEncoder() {
 }
 
 // ==================== Improved terminal line reader ====================
-// - Echo-back typed characters
-// - Backspace/Delete support (erase from screen)
-// - CR, LF, or CRLF line endings
-// - Ctrl-U: clear entire line
-// - Ctrl-W: delete previous word
-// - Ctrl-C: cancel current line (returns empty line to caller)
 static inline bool isPrintableAscii(char c) {
   return c >= 0x20 && c <= 0x7E;
 }
@@ -115,6 +108,12 @@ static void termEraseChars(Stream& s, size_t n) {
   }
 }
 bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
+  // - Echo-back typed characters
+  // - Backspace/Delete support (erase from screen)
+  // - CR, LF, or CRLF line endings
+  // - Ctrl-U: clear entire line
+  // - Ctrl-W: delete previous word
+  // - Ctrl-C: cancel current line (returns empty line to caller)
   while (s.available()) {
     char c = (char)s.read();
 
@@ -301,10 +300,7 @@ void animateTextToCenterAndCompress(Adafruit_SSD1306& d,
     }
   }
 }
-inline void bootExplosion(Adafruit_SSD1306& d) {
-  bootExplosion(d, 350);
-}
-void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs) {
+void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
   const int W = d.width();
   const int H = d.height();
 
@@ -417,10 +413,11 @@ void sendHelpRP() {
 }
 
 void handleCommand(const char* line, Stream& io) {
-  if (line[0] == '\0') return;
+  if (line[0] == '\0') return;  // Return if termination is first-in char
 
-  const bool fromUSB = (&io == &Serial);
+  const bool fromUSB = (&io == &Serial);  // Is our IO stream is from the USB serial
 
+  // ==================== Boot to bootloader ====================
   if (!strcmp(line, "BOOTSEL") && fromUSB) {
     Serial.println("Rebooting to bootloader now!");
     Serial.printf("\r> ");
@@ -429,6 +426,7 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
+  // ==================== Cycle to next step size preset ====================
   if (!strcmp(line, "SETSTEP") && fromUSB) {
     time_now = (millis() + 300);
     setstep();
@@ -436,6 +434,8 @@ void handleCommand(const char* line, Stream& io) {
     Serial.printf("\r> ");
     return;
   }
+
+  // ==================== Cycle to next band preset ====================
   if (!strcmp(line, "INCBAND") && fromUSB) {
     time_now = (millis() + 300);
     inc_preset();
@@ -444,6 +444,7 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
+  // ==================== Return the current frequency ====================
   if (!strcmp(line, "FREQ?") && fromUSB) {
     char buf[32];
     formatFreqSmart(freq, buf, sizeof(buf));
@@ -453,6 +454,7 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
+  // ==================== I2C device scanner ====================
   if (!strcmp(line, "I2C?") && fromUSB) {
     for (uint8_t addr = 1; addr < 127; addr++) {
       Wire.beginTransmission(addr);
@@ -466,6 +468,7 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
+  // ==================== Return help dialog ====================
   if (!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H") && fromUSB) {
     sendHelpRP();
     Serial.println();
@@ -473,12 +476,13 @@ void handleCommand(const char* line, Stream& io) {
     return;
   }
 
-  // KEY [VALUE] numeric
+  // ==================== Handler for KEY [VALUE] numeric ====================
   char key[8] = { 0 };
   long val = 0;
   int matched = sscanf(line, "%7s %ld", key, &val);
   if (matched >= 1 && fromUSB) {
     if (!strcmp(key, "FREQ") && matched == 2 && fromUSB) {
+      // ==================== Set a frequency in Hertz ====================
       if (val < 10000) val = 10000;
       if ((unsigned long)val > 225000000UL) val = 225000000UL;
       freq = (unsigned long)val;
@@ -486,6 +490,7 @@ void handleCommand(const char* line, Stream& io) {
       Serial.printf("\r> ");
       return;
     } else if (!strcmp(key, "IF") && matched == 2 && fromUSB) {
+      // ==================== Set an inter-frequency in kHz ====================
       if (val < 0) val = 0;
       if (val > 200000) val = 200000;
       interfreq = val;
@@ -493,6 +498,7 @@ void handleCommand(const char* line, Stream& io) {
       Serial.printf("\r> ");
       return;
     } else if (!strcmp(key, "SIGMETER") && matched == 2 && fromUSB) {
+      // ==================== Set the signal meter value ====================
       if (val < 1) val = 1;
       if (val > 14) val = 14;
       x = (byte)val;
@@ -502,7 +508,7 @@ void handleCommand(const char* line, Stream& io) {
     }
   }
 
-  // Unknown command -> optionally report over USB and forward if from USB
+  // ==================== Unknown command ====================
   Serial.printf("RP2040Zero: Unknown cmd: ");
   Serial.println(line);
   Serial.printf("\r> ");
@@ -510,12 +516,18 @@ void handleCommand(const char* line, Stream& io) {
 
 // ==================== Setup ====================
 void setup() {
+  // ==================== Serial init ====================
   Serial.begin(BAUD);
-  //while (!Serial) {}
-  delay(3000);
+  if (WAIT_USB_SERIAL) {
+    while (!Serial) {}
+    delay(500);
+  } else {
+    delay(3000);
+  }
   Serial.println("\n\r\nRP2040Zero (boot): FW VER: 1.0.2");
   Serial.println("RP2040Zero (boot): Starting now..");
 
+  // ==================== Rotary init ====================
   pinMode(rotLeft, INPUT_PULLUP);
   pinMode(rotRight, INPUT_PULLUP);
   {
@@ -525,15 +537,18 @@ void setup() {
     encAccum = 0;
   }
 
+  // ==================== LED init ====================
   strip.begin();
   strip.show();
   strip.setBrightness(64);
   strip.setPixelColor(0, 64, 64, 64);
   strip.show();
 
+  // ==================== I2C init ====================
   Wire.setClock(100000);
   Wire.begin();
 
+  // ==================== Tuner init ====================
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
   si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
   si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
@@ -541,26 +556,29 @@ void setup() {
   si5351.output_enable(SI5351_CLK1, 0);
   si5351.output_enable(SI5351_CLK2, 0);
 
+  // ==================== Tuner variables init ====================
   count = BAND_INIT;
   bandpresets();
-  stp = 6;
+  stp = STEP_INIT;
   setstep();
 
+  // ==================== Display init ====================
   display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.display();
   display.setTextSize(1);
 
+  // ==================== Boot Animations ====================
   display.setCursor(0, 0);
   animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
   bootExplosion(display, 400);
 
+  // ==================== I2C detection ====================
   display.clearDisplay();
   display.setCursor(0, 0);
   display.print("RP2040 I2C device(s):");
   display.setCursor(0, 12);
-
   Serial.println("RP2040Zero (boot): Detected I2C device(s):");
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
@@ -574,43 +592,50 @@ void setup() {
     }
   }
 
+  // ==================== Boot process finished ====================
   delay(750);
   strip.setBrightness(32);
   strip.setPixelColor(0, 64, 0, 32);
   strip.show();
-
   Serial.print("RP2040Zero (boot): Running loop now..\n\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
 }
 
 // ==================== Loop ====================
 void loop() {
+  // ==================== Pass USB serial data into our command handler ====================
   if (readLine(Serial, sUsbBuf, sUsbLen, CMD_BUF_SZ)) {
     handleCommand(sUsbBuf, Serial);
   }
 
-  pollEncoder();
-  uiScanTick();
+  pollEncoder();  // ==================== Rotary encoder polling ====================
+  uiScanTick();   // ==================== Scanner tick ====================
 
+  // ==================== Frequency changed, retune now ====================
   if (freqold != freq) {
     time_now = millis();
     tunegen();
     freqold = freq;
   }
+
+  // ==================== Inter-Frequency changed, retune now ====================
   if (interfreqold != interfreq) {
     time_now = millis();
-    if (!uiScanOn && interfreq != lastSentIF) {  // don’t push IF in scan
+    if (!uiScanOn && interfreq != lastSentIF) {  // don't push IF in scan
       lastSentIF = interfreq;
     }
     tunegen();  // early-returns when uiScanOn
     interfreqold = interfreq;
   }
+
+  // ==================== ??? changed, ??? now ====================
   if (xo != x) {
     time_now = millis();
     xo = x;
   }
 
-  static unsigned long lastDraw = 0;
-  const unsigned long drawPeriod = 100;
+  // ==================== Limit display ticks ====================
+  static unsigned long lastDraw = 0;     // last time since redraw in milliseconds
+  const unsigned long drawPeriod = 100;  // redraw time in milliseconds
   if (millis() - lastDraw >= drawPeriod) {
     lastDraw = millis();
     displayfreq();
@@ -636,7 +661,6 @@ static void uiScanStart() {
 }
 static void uiScanStop() {
   uiScanOn = false;
-  uiScanPending = false;
 }
 static void uiScanTick() {
   if (!uiScanOn) return;
