@@ -74,7 +74,7 @@ Si5351 si5351(0x60);                                          // Si531 programma
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);  // WS2812 LED on WaveShare RP2040 Zero PCB
 
 // ==================== Rotary Encoder ====================
-inline void pollEncoder() {
+/*inline void pollEncoder() {
   uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
   uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
   uint8_t curr = (a << 1) | b;
@@ -90,6 +90,25 @@ inline void pollEncoder() {
       set_frequency(-1);
       encAccum = 0;
       delay(50);
+    }
+  }
+  encPrev = curr;
+}*/
+inline void pollEncoder() {
+  static uint32_t lastStepMs = 0;
+  const uint8_t a = (digitalRead(rotRight) == LOW);
+  const uint8_t b = (digitalRead(rotLeft) == LOW);
+  const uint8_t curr = (a << 1) | b;
+  const uint8_t idx = (encPrev << 2) | curr;
+  const int8_t delta = encTable[idx];
+  if (delta != 0) {
+    encAccum += delta;
+    if (encAccum >= 4 || encAccum <= -4) {
+      if (millis() - lastStepMs >= 2) {  // small throttle if needed
+        set_frequency(encAccum > 0 ? 1 : -1);
+        lastStepMs = millis();
+      }
+      encAccum = 0;
     }
   }
   encPrev = curr;
@@ -411,7 +430,6 @@ void sendHelpRP() {
   Serial.println("  Ctrl-W                - delete previous word");
   Serial.println("  Ctrl-C                - cancel current line");
 }
-
 void handleCommand(const char* line, Stream& io) {
   if (line[0] == '\0') return;  // Return if termination is first-in char
 
@@ -448,7 +466,7 @@ void handleCommand(const char* line, Stream& io) {
   if (!strcmp(line, "FREQ?") && fromUSB) {
     char buf[32];
     formatFreqSmart(freq, buf, sizeof(buf));
-    Serial.printf("RP2040Zero: tuned to: %u Hz (%s)\n", freq, buf);
+    Serial.printf("RP2040Zero: tuned to: %lu Hz (%s)\n", (unsigned long)freq, buf);
     time_now = millis();
     Serial.printf("\r> ");
     return;
@@ -469,7 +487,7 @@ void handleCommand(const char* line, Stream& io) {
   }
 
   // ==================== Return help dialog ====================
-  if (!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H") && fromUSB) {
+  if ((!strcmp(line, "HELP") || !strcmp(line, "?") || !strcmp(line, "H")) && fromUSB) {
     sendHelpRP();
     Serial.println();
     Serial.printf("\r> ");
@@ -563,7 +581,7 @@ void setup() {
   setstep();
 
   // ==================== Display init ====================
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3D*/);
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.display();
@@ -725,7 +743,6 @@ void set_frequency(short dir) {
   }
 }
 void tunegen() {
-  if (uiScanOn) return;  // Mirror mode: don’t drive the Nano
   uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
   uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
   si5351.set_freq(outCentiHz, SI5351_CLK0);
