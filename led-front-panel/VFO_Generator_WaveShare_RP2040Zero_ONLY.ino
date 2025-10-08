@@ -9,7 +9,7 @@
 #include "string_switch.h"
 
 // ==================== Defines ====================
-#define FW_VERSION "1.0.6"  // Our firmware version
+#define FW_VERSION "1.0.7"  // Our firmware version
 #define IF 10700            // Inter-Frequency in kHz
 #define BAND_INIT 18        // Initial band preset
 #define STEP_INIT 6         // Initial step size preset
@@ -186,6 +186,534 @@ static unsigned long sCfgDirtySince = 0;                // time in milliseconds 
 static unsigned long sCfgLastSave = 0;                  // time in milliseconds since config was last saved
 static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // minimum gap in milliseconds between writes
 static const unsigned long CFG_DEBOUNCE_MS = 5000;      // delay after last change before saving
+
+// ==================== Boot Animations ====================
+void animateTextToCenterAndCompress(Adafruit_SSD1306& d, const char* text, int startX, int startY, uint16_t moveMs, uint16_t compressMs, float minScaleY, float maxStretchX);
+void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs);
+
+// ==================== Setup ====================
+void setup() {
+  // ==================== Serial init ====================
+  Serial.begin(BAUD);
+  if (WAIT_USB_SERIAL) {
+    while (!Serial) {}
+    delay(500);
+  } else {
+    delay(3000);
+  }
+  Serial.printf("\n\r\nRP2040Zero (boot): FW VER: %s\n\r", FW_VERSION);
+  Serial.println("RP2040Zero (boot): Starting now..");
+
+  // ==================== Rotary init ====================
+  pinMode(rotLeft, INPUT_PULLUP);
+  pinMode(rotRight, INPUT_PULLUP);
+  {
+    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
+    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
+    encPrev = (a << 1) | b;
+    encAccum = 0;
+  }
+
+  // ==================== LED init ====================
+  strip.begin();
+  strip.show();
+  strip.setBrightness(64);
+  strip.setPixelColor(0, 64, 64, 64);
+  strip.show();
+
+  // ==================== I2C init ====================
+  Wire.setClock(100000);
+  Wire.begin();
+
+  // ==================== Tuner init ====================
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+  si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+  si5351.output_enable(SI5351_CLK0, 1);
+  si5351.output_enable(SI5351_CLK1, 0);
+  si5351.output_enable(SI5351_CLK2, 0);
+
+  // ==================== Tuner variables init ====================
+  count = BAND_INIT;
+  bandpresets();
+  stp = STEP_INIT;
+  setstep();
+
+  // ==================== Persistent config ====================
+  cfgInitAndLoad();
+  // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
+  // Saved ttyRows/ttyCols/ANSI are already applied to globals.
+
+  // ==================== Display init ====================
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3D*/);
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.display();
+  display.setTextSize(1);
+
+  // ==================== Boot Animations ====================
+  display.setCursor(0, 0);
+  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
+  bootExplosion(display, 400);
+
+  // ==================== I2C detection ====================
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print("RP2040 I2C device(s):");
+  display.setCursor(0, 12);
+  Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
+  int i2cDevsFound = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      if (i2cDevsFound >= 1) {
+        Serial.print(", 0x");
+        Serial.print(addr, HEX);
+      } else {
+        Serial.print("0x");
+        Serial.print(addr, HEX);
+      }
+      display.print("0x");
+      display.print(addr, HEX);
+      display.print(" ");
+      display.display();
+      i2cDevsFound++;
+    }
+  }
+  Serial.println();
+
+  // ==================== Boot process finished ====================
+  delay(750);
+  strip.setBrightness(32);
+  strip.setPixelColor(0, 64, 0, 32);
+  strip.show();
+  Serial.print("RP2040Zero (boot): Running loop now..\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
+}
+// ==================== Loop ====================
+void loop() {
+  // ==================== Pass USB serial data into our command handler ====================
+  if (readLine(Serial, sUsbBuf, sUsbLen, CMD_BUF_SZ)) {
+    handleCommand(sUsbBuf, Serial);
+  }
+
+  cfgTick();      // ==================== Flush pending config saves (debounced to reduce wear) ====================
+  pollEncoder();  // ==================== Rotary encoder polling ====================
+  uiScanTick();   // ==================== Scanner tick ====================
+  tuiTick();      // ==================== Terminal UI tick ====================
+
+  // ==================== Frequency changed, retune now ====================
+  if (freqold != freq) {
+    time_now = millis();
+    tunegen();
+    freqold = freq;
+    tuiMarkDirty();  // reflect changes to TUI
+  }
+
+  // ==================== Inter-Frequency changed, retune now ====================
+  if (interfreqold != interfreq) {
+    time_now = millis();
+    if (!uiScanOn && interfreq != lastSentIF) {  // don't push IF in scan
+      lastSentIF = interfreq;
+    }
+    tunegen();  // early-returns when uiScanOn
+    interfreqold = interfreq;
+    tuiMarkDirty();  // reflect changes to TUI
+  }
+
+  // ==================== ??? changed, ??? now ====================
+  if (xo != x) {
+    time_now = millis();
+    xo = x;
+    tuiMarkDirty();  // reflect changes to TUI
+  }
+
+  // ==================== Limit display ticks ====================
+  static unsigned long lastDraw = 0;     // last time since redraw in milliseconds
+  const unsigned long drawPeriod = 100;  // redraw time in milliseconds
+  if (millis() - lastDraw >= drawPeriod) {
+    lastDraw = millis();
+    displayfreq();
+    layout();
+  }
+}
+
+// ==================== UI Scanner ====================
+static inline size_t uiCurrentListLen() {
+  return uiScanSrc ? uiCustomScanLen : uiHardScanLen;
+}
+static inline const uint32_t* uiCurrentListPtr() {
+  return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+}
+static inline const uint32_t* uiCurrentListPtr(const String& band) {
+  // String overload
+  STR_SWITCH(band)
+  STR_CASE("FM") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListFM;
+  }
+  STR_CASE("NOAA") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListNOAA;
+  }
+  STR_CASE("CB") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_DEFAULT {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_SWITCH_END;
+}
+static inline const uint32_t* uiCurrentListPtr(const char* band) {
+  // C-string overload
+  STR_SWITCH(band)
+  STR_CASE("FM") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListFM;
+  }
+  STR_CASE("NOAA") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListNOAA;
+  }
+  STR_CASE("CB") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_DEFAULT {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_SWITCH_END;
+}
+static inline void uiScanUse(uint8_t src) {
+  uiScanSrc = src ? 1 : 0;
+}
+static void uiScanStart() {
+  if (uiCurrentListLen() == 0) return;
+  uiScanOn = true;
+  uiScanIdx = 0;
+  uiScanLastMs = millis() - uiScanDelayMs;
+}
+static void uiScanStop() {
+  uiScanOn = false;
+}
+static void sendScanStatus() {
+  if (uiScanOn) {
+    Serial.println("Scanning");
+  } else {
+    Serial.println("Idling");
+  }
+}
+static void uiScanTick() {
+  if (!uiScanOn) return;
+  if (sts) return;
+
+  size_t len = uiCurrentListLen();
+  if (len == 0) {
+    uiScanOn = false;
+    return;
+  }
+  uint32_t now = millis();
+  if ((now - uiScanLastMs) >= uiScanDelayMs) {
+    uiScanLastMs = now;
+    const uint32_t* list = uiCurrentListPtr();
+    uiScanCurrFreqHz = list[uiScanIdx];
+    freq = uiScanCurrFreqHz;
+    uiScanIdx = (uiScanIdx + 1) % len;
+  }
+}
+static inline unsigned long uiDisplayFreqHz() {
+  if (uiScanOn) {
+    if (uiScanCurrFreqHz != 0) return uiScanCurrFreqHz;
+    if (uiCurrentListLen() > 0) return uiCurrentListPtr()[0];
+  }
+  return freq;
+}
+static void drawScanUiOverlay() {
+  if (!uiScanOn) return;
+  display.setTextSize(1);
+  display.setCursor(0, -2);
+  display.print("s");
+  size_t len = uiCurrentListLen();
+  if (len > 0) {
+    const int barX0 = 96;
+    const int barW = 31;
+    const int barY = 0;
+    display.drawRect(barX0, barY, barW, 2, WHITE);
+    int fillW = 0;
+    if (uiScanIdx > 0) {
+      float p = (float)uiScanIdx / (float)len;
+      if (p > 1.0f) p = 1.0f;
+      fillW = (int)((barW - 2) * p);
+    }
+    if (fillW > 0) display.fillRect(barX0 + 1, barY + 1, fillW, 1, WHITE);
+  }
+}
+
+// ==================== Tuner ====================
+void set_frequency(short dir) {
+  if (encoder == 1) {
+    if (dir == 1) freq = freq + fstep;
+    if (freq >= 225000000UL) freq = 225000000UL;
+    if (dir == -1) freq = freq - fstep;
+    if (fstep == 1000000 && freq <= 1000000) freq = 1000000;
+    else if (freq < 10000) freq = 10000;
+  }
+  if (encoder == 1) {
+    if (dir == 1) n = n + 1;
+    if (n > 42) n = 1;
+    if (dir == -1) n = n - 1;
+    if (n < 1) n = 42;
+  }
+}
+void tunegen() {
+  uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
+  uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
+  si5351.set_freq(outCentiHz, SI5351_CLK0);
+}
+static void formatFreqSmart(uint32_t hz, char* out, size_t outSz) {
+  // Formats Hz as "### Hz", "###.### kHz", or "###.### MHz" (trims trailing zeros)
+  if (hz < 1000UL) {
+    snprintf(out, outSz, "%lu Hz", (unsigned long)hz);
+    return;
+  }
+  if (hz < 1000000UL) {  // kHz
+    uint32_t k = hz / 1000UL;
+    uint32_t rem = hz % 1000UL;  // Hz remainder -> fractional kHz
+    if (rem == 0) {
+      snprintf(out, outSz, "%lu kHz", (unsigned long)k);
+    } else {
+      char frac[4];
+      snprintf(frac, sizeof(frac), "%03lu", (unsigned long)rem);  // 3 decimals
+      int len = 3;
+      while (len > 0 && frac[len - 1] == '0') frac[--len] = '\0';
+      snprintf(out, outSz, "%lu.%s kHz", (unsigned long)k, frac);
+    }
+    return;
+  }
+  // MHz
+  uint32_t m = hz / 1000000UL;
+  uint32_t rem = hz % 1000000UL;  // 0..999999 Hz -> fractional MHz
+  if (rem == 0) {
+    snprintf(out, outSz, "%lu MHz", (unsigned long)m);
+  } else {
+    // Show kHz as the fractional part (3 decimals), trim trailing zeros
+    uint32_t frac = rem / 1000UL;  // 0..999 kHz
+    char frac3[4];
+    snprintf(frac3, sizeof(frac3), "%03lu", (unsigned long)frac);
+    int len = 3;
+    while (len > 0 && frac3[len - 1] == '0') frac3[--len] = '\0';
+    if (len == 0) {
+      snprintf(out, outSz, "%lu MHz", (unsigned long)m);
+    } else {
+      snprintf(out, outSz, "%lu.%s MHz", (unsigned long)m, frac3);
+    }
+  }
+}
+void displayfreq() {
+  unsigned long df = uiDisplayFreqHz();
+  unsigned int m = df / 1000000UL;
+  unsigned int k = (df % 1000000UL) / 1000UL;
+  unsigned int h = (df % 1000UL) / 1UL;
+
+  display.clearDisplay();
+  display.setTextSize(2);
+
+  char buffer[15] = "";
+  if (m < 1) {
+    display.setCursor(41, 1);
+    sprintf(buffer, "%003d.%003d", k, h);
+  } else if (m < 100) {
+    display.setCursor(5, 1);
+    sprintf(buffer, "%2d.%003d.%003d", m, k, h);
+  } else if (m >= 100) {
+    unsigned int h2 = (df % 1000UL) / 10UL;
+    display.setCursor(5, 1);
+    sprintf(buffer, "%2d.%003d.%02d", m, k, h2);
+  }
+  display.print(buffer);
+}
+void setstep() {
+  switch (stp) {
+    case 1:
+      stp = 2;
+      fstep = 1;
+      break;
+    case 2:
+      stp = 3;
+      fstep = 10;
+      break;
+    case 3:
+      stp = 4;
+      fstep = 1000;
+      break;
+    case 4:
+      stp = 5;
+      fstep = 5000;
+      break;
+    case 5:
+      stp = 6;
+      fstep = 10000;
+      break;
+    case 6:
+      stp = 7;
+      fstep = 100000;
+      break;
+    case 7:
+      stp = 8;
+      fstep = 1000000;
+      break;
+    case 8:
+      stp = 1;
+      fstep = 10000000;
+      break;
+  }
+}
+void inc_preset() {
+  count++;
+  if (count > 21) count = 1;
+  bandpresets();
+  delay(50);
+}
+void bandpresets() {
+  switch (count) {
+    case 1: freq = 100000; break;
+    case 2: freq = 800000; break;
+    case 3: freq = 1800000; break;
+    case 4: freq = 3650000; break;
+    case 5: freq = 4985000; break;
+    case 6: freq = 6180000; break;
+    case 7: freq = 7200000; break;
+    case 8: freq = 10000000; break;
+    case 9: freq = 11780000; break;
+    case 10: freq = 13630000; break;
+    case 11: freq = 14100000; break;
+    case 12: freq = 15000000; break;
+    case 13: freq = 17655000; break;
+    case 14: freq = 21525000; break;
+    case 15: freq = 27025000; break;
+    case 16: freq = 28400000; break;
+    case 17: freq = 50000000; break;
+    case 18: freq = 107700000; break;
+    case 19: freq = 130000000; break;
+    case 20: freq = 144000000; break;
+    case 21: freq = 220000000; break;
+  }
+  stp = 4;
+  setstep();
+}
+void layout() {
+  display.setTextColor(WHITE);
+  display.drawLine(0, 20, 127, 20, WHITE);
+  display.drawLine(0, 43, 127, 43, WHITE);
+  display.drawLine(105, 24, 105, 39, WHITE);
+  display.drawLine(87, 24, 87, 39, WHITE);
+  display.drawLine(87, 48, 87, 63, WHITE);
+  display.drawLine(15, 55, 82, 55, WHITE);
+  display.setTextSize(1);
+  display.setCursor(59, 23);
+  display.print("STEP");
+  display.setCursor(51, 33);
+  if (stp == 2) display.print("  1Hz");
+  if (stp == 3) display.print(" 10Hz");
+  if (stp == 4) display.print(" 1kHz");
+  if (stp == 5) display.print(" 5kHz");
+  if (stp == 6) display.print("10kHz");
+  if (stp == 7) display.print("100kHz");
+  if (stp == 8) display.print(" 1MHz");
+  if (stp == 1) display.print(" 10MHz");
+
+  display.setTextSize(1);
+  display.setCursor(92, 48);
+  display.print("IF:");
+  display.setCursor(92, 57);
+  display.print(interfreq);
+  display.print("k");
+
+  display.setTextSize(1);
+  display.setCursor(110, 23);
+  if (freq < 1000000) display.print("kHz");
+  if (freq >= 1000000) display.print("MHz");
+  display.setCursor(110, 33);
+  if (interfreq == 0) display.print("VFO");
+  if (interfreq != 0) display.print("L O");
+
+  display.setCursor(91, 28);
+  if (!sts) display.print("RX");
+  if (!sts) interfreq = IF;
+  if (sts) display.print("TX");
+  if (sts) interfreq = 0;
+
+  bandlist();
+  drawbargraph();
+  drawScanUiOverlay();
+  display.display();
+}
+void bandlist() {
+  display.setTextSize(2);
+  display.setCursor(0, 25);
+  if (count == 1) display.print("GEN");
+  if (count == 2) display.print("MW");
+  if (count == 3) display.print("160m");
+  if (count == 4) display.print("80m");
+  if (count == 5) display.print("60m");
+  if (count == 6) display.print("49m");
+  if (count == 7) display.print("40m");
+  if (count == 8) display.print("31m");
+  if (count == 9) display.print("25m");
+  if (count == 10) display.print("22m");
+  if (count == 11) display.print("20m");
+  if (count == 12) display.print("19m");
+  if (count == 13) display.print("16m");
+  if (count == 14) display.print("13m");
+  if (count == 15) display.print("11m");
+  if (count == 16) display.print("10m");
+  if (count == 17) display.print("6m");
+  if (count == 18) display.print("WFM");
+  if (count == 19) display.print("AIR");
+  if (count == 20) display.print("2m");
+  if (count == 21) display.print("1m");
+  if (count == 1) interfreq = 0;
+  else if (!sts) interfreq = IF;
+}
+void drawbargraph() {
+  byte y = map(n, 1, 42, 1, 14);
+
+  display.setTextSize(1);
+  display.setCursor(0, 48);
+  display.print("TU");
+
+  switch (y) {
+    case 1: display.fillRect(15, 48, 2, 6, WHITE); break;
+    case 2: display.fillRect(20, 48, 2, 6, WHITE); break;
+    case 3: display.fillRect(25, 48, 2, 6, WHITE); break;
+    case 4: display.fillRect(30, 48, 2, 6, WHITE); break;
+    case 5: display.fillRect(35, 48, 2, 6, WHITE); break;
+    case 6: display.fillRect(40, 48, 2, 6, WHITE); break;
+    case 7: display.fillRect(45, 48, 2, 6, WHITE); break;
+    case 8: display.fillRect(50, 48, 2, 6, WHITE); break;
+    case 9: display.fillRect(55, 48, 2, 6, WHITE); break;
+    case 10: display.fillRect(60, 48, 2, 6, WHITE); break;
+    case 11: display.fillRect(65, 48, 2, 6, WHITE); break;
+    case 12: display.fillRect(70, 48, 2, 6, WHITE); break;
+    case 13: display.fillRect(75, 48, 2, 6, WHITE); break;
+    case 14: display.fillRect(80, 48, 2, 6, WHITE); break;
+  }
+
+  display.setCursor(0, 57);
+  display.print("SM");
+  switch (x) {
+    case 14: display.fillRect(80, 58, 2, 6, WHITE);
+    case 13: display.fillRect(75, 58, 2, 6, WHITE);
+    case 12: display.fillRect(70, 58, 2, 6, WHITE);
+    case 11: display.fillRect(65, 58, 2, 6, WHITE);
+    case 10: display.fillRect(60, 58, 2, 6, WHITE);
+    case 9: display.fillRect(55, 58, 2, 6, WHITE);
+    case 8: display.fillRect(50, 58, 2, 6, WHITE);
+    case 7: display.fillRect(45, 58, 2, 6, WHITE);
+    case 6: display.fillRect(40, 58, 2, 6, WHITE);
+    case 5: display.fillRect(35, 58, 2, 6, WHITE);
+    case 4: display.fillRect(30, 58, 2, 6, WHITE);
+    case 3: display.fillRect(25, 58, 2, 6, WHITE);
+    case 2: display.fillRect(20, 58, 2, 6, WHITE);
+    case 1: display.fillRect(15, 58, 2, 6, WHITE);
+    default: display.fillRect(15, 58, 2, 6, WHITE);
+  }
+}
+
 static inline unsigned long stepIndexToFstep(uint8_t stpIdx) {
   // Helper: map step index -> step size (Hz), mirrors your setstep() table without cycling
   switch (stpIdx) {
@@ -1534,527 +2062,4 @@ void handleCommand(const char* line, Stream& io) {
     termPrompt();
   }
   tuiMarkDirty();
-}
-
-// ==================== Setup ====================
-void setup() {
-  // ==================== Serial init ====================
-  Serial.begin(BAUD);
-  if (WAIT_USB_SERIAL) {
-    while (!Serial) {}
-    delay(500);
-  } else {
-    delay(3000);
-  }
-  Serial.printf("\n\r\nRP2040Zero (boot): FW VER: %s\n\r", FW_VERSION);
-  Serial.println("RP2040Zero (boot): Starting now..");
-
-  // ==================== Rotary init ====================
-  pinMode(rotLeft, INPUT_PULLUP);
-  pinMode(rotRight, INPUT_PULLUP);
-  {
-    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
-    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
-    encPrev = (a << 1) | b;
-    encAccum = 0;
-  }
-
-  // ==================== LED init ====================
-  strip.begin();
-  strip.show();
-  strip.setBrightness(64);
-  strip.setPixelColor(0, 64, 64, 64);
-  strip.show();
-
-  // ==================== I2C init ====================
-  Wire.setClock(100000);
-  Wire.begin();
-
-  // ==================== Tuner init ====================
-  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
-  si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
-  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
-  si5351.output_enable(SI5351_CLK0, 1);
-  si5351.output_enable(SI5351_CLK1, 0);
-  si5351.output_enable(SI5351_CLK2, 0);
-
-  // ==================== Tuner variables init ====================
-  count = BAND_INIT;
-  bandpresets();
-  stp = STEP_INIT;
-  setstep();
-
-  // ==================== Persistent config ====================
-  cfgInitAndLoad();
-  // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
-  // Saved ttyRows/ttyCols/ANSI are already applied to globals.
-
-  // ==================== Display init ====================
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3D*/);
-  display.clearDisplay();
-  display.setTextColor(WHITE);
-  display.display();
-  display.setTextSize(1);
-
-  // ==================== Boot Animations ====================
-  display.setCursor(0, 0);
-  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
-  bootExplosion(display, 400);
-
-  // ==================== I2C detection ====================
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.print("RP2040 I2C device(s):");
-  display.setCursor(0, 12);
-  Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
-  int i2cDevsFound = 0;
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
-      if (i2cDevsFound >= 1) {
-        Serial.print(", 0x");
-        Serial.print(addr, HEX);
-      } else {
-        Serial.print("0x");
-        Serial.print(addr, HEX);
-      }
-      display.print("0x");
-      display.print(addr, HEX);
-      display.print(" ");
-      display.display();
-      i2cDevsFound++;
-    }
-  }
-  Serial.println();
-
-  // ==================== Boot process finished ====================
-  delay(750);
-  strip.setBrightness(32);
-  strip.setPixelColor(0, 64, 0, 32);
-  strip.show();
-  Serial.print("RP2040Zero (boot): Running loop now..\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
-}
-// ==================== Loop ====================
-void loop() {
-  // ==================== Pass USB serial data into our command handler ====================
-  if (readLine(Serial, sUsbBuf, sUsbLen, CMD_BUF_SZ)) {
-    handleCommand(sUsbBuf, Serial);
-  }
-
-  cfgTick();      // ==================== Flush pending config saves (debounced to reduce wear) ====================
-  pollEncoder();  // ==================== Rotary encoder polling ====================
-  uiScanTick();   // ==================== Scanner tick ====================
-  tuiTick();      // ==================== Terminal UI tick ====================
-
-  // ==================== Frequency changed, retune now ====================
-  if (freqold != freq) {
-    time_now = millis();
-    tunegen();
-    freqold = freq;
-    tuiMarkDirty();  // reflect changes to TUI
-  }
-
-  // ==================== Inter-Frequency changed, retune now ====================
-  if (interfreqold != interfreq) {
-    time_now = millis();
-    if (!uiScanOn && interfreq != lastSentIF) {  // don't push IF in scan
-      lastSentIF = interfreq;
-    }
-    tunegen();  // early-returns when uiScanOn
-    interfreqold = interfreq;
-    tuiMarkDirty();  // reflect changes to TUI
-  }
-
-  // ==================== ??? changed, ??? now ====================
-  if (xo != x) {
-    time_now = millis();
-    xo = x;
-    tuiMarkDirty();  // reflect changes to TUI
-  }
-
-  // ==================== Limit display ticks ====================
-  static unsigned long lastDraw = 0;     // last time since redraw in milliseconds
-  const unsigned long drawPeriod = 100;  // redraw time in milliseconds
-  if (millis() - lastDraw >= drawPeriod) {
-    lastDraw = millis();
-    displayfreq();
-    layout();
-  }
-}
-
-// ==================== UI Scanner ====================
-static inline size_t uiCurrentListLen() {
-  return uiScanSrc ? uiCustomScanLen : uiHardScanLen;
-}
-static inline const uint32_t* uiCurrentListPtr() {
-  return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
-}
-static inline const uint32_t* uiCurrentListPtr(const String& band) {
-  // String overload
-  STR_SWITCH(band)
-  STR_CASE("FM") {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListFM;
-  }
-  STR_CASE("NOAA") {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListNOAA;
-  }
-  STR_CASE("CB") {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
-  }
-  STR_DEFAULT {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
-  }
-  STR_SWITCH_END;
-}
-static inline const uint32_t* uiCurrentListPtr(const char* band) {
-  // C-string overload
-  STR_SWITCH(band)
-  STR_CASE("FM") {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListFM;
-  }
-  STR_CASE("NOAA") {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListNOAA;
-  }
-  STR_CASE("CB") {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
-  }
-  STR_DEFAULT {
-    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
-  }
-  STR_SWITCH_END;
-}
-static inline void uiScanUse(uint8_t src) {
-  uiScanSrc = src ? 1 : 0;
-}
-static void uiScanStart() {
-  if (uiCurrentListLen() == 0) return;
-  uiScanOn = true;
-  uiScanIdx = 0;
-  uiScanLastMs = millis() - uiScanDelayMs;
-}
-static void uiScanStop() {
-  uiScanOn = false;
-}
-static void sendScanStatus() {
-  if (uiScanOn) {
-    Serial.println("Scanning");
-  } else {
-    Serial.println("Idling");
-  }
-}
-static void uiScanTick() {
-  if (!uiScanOn) return;
-  if (sts) return;
-
-  size_t len = uiCurrentListLen();
-  if (len == 0) {
-    uiScanOn = false;
-    return;
-  }
-  uint32_t now = millis();
-  if ((now - uiScanLastMs) >= uiScanDelayMs) {
-    uiScanLastMs = now;
-    const uint32_t* list = uiCurrentListPtr();
-    uiScanCurrFreqHz = list[uiScanIdx];
-    freq = uiScanCurrFreqHz;
-    uiScanIdx = (uiScanIdx + 1) % len;
-  }
-}
-static inline unsigned long uiDisplayFreqHz() {
-  if (uiScanOn) {
-    if (uiScanCurrFreqHz != 0) return uiScanCurrFreqHz;
-    if (uiCurrentListLen() > 0) return uiCurrentListPtr()[0];
-  }
-  return freq;
-}
-static void drawScanUiOverlay() {
-  if (!uiScanOn) return;
-  display.setTextSize(1);
-  display.setCursor(0, -2);
-  display.print("s");
-  size_t len = uiCurrentListLen();
-  if (len > 0) {
-    const int barX0 = 96;
-    const int barW = 31;
-    const int barY = 0;
-    display.drawRect(barX0, barY, barW, 2, WHITE);
-    int fillW = 0;
-    if (uiScanIdx > 0) {
-      float p = (float)uiScanIdx / (float)len;
-      if (p > 1.0f) p = 1.0f;
-      fillW = (int)((barW - 2) * p);
-    }
-    if (fillW > 0) display.fillRect(barX0 + 1, barY + 1, fillW, 1, WHITE);
-  }
-}
-
-// ==================== Tuner ====================
-void set_frequency(short dir) {
-  if (encoder == 1) {
-    if (dir == 1) freq = freq + fstep;
-    if (freq >= 225000000UL) freq = 225000000UL;
-    if (dir == -1) freq = freq - fstep;
-    if (fstep == 1000000 && freq <= 1000000) freq = 1000000;
-    else if (freq < 10000) freq = 10000;
-  }
-  if (encoder == 1) {
-    if (dir == 1) n = n + 1;
-    if (n > 42) n = 1;
-    if (dir == -1) n = n - 1;
-    if (n < 1) n = 42;
-  }
-}
-void tunegen() {
-  uint32_t ifHz = sts ? 0UL : (uint32_t)interfreq * 1000UL;
-  uint64_t outCentiHz = ((uint64_t)freq + (uint64_t)ifHz) * 100ULL;
-  si5351.set_freq(outCentiHz, SI5351_CLK0);
-}
-static void formatFreqSmart(uint32_t hz, char* out, size_t outSz) {
-  // Formats Hz as "### Hz", "###.### kHz", or "###.### MHz" (trims trailing zeros)
-  if (hz < 1000UL) {
-    snprintf(out, outSz, "%lu Hz", (unsigned long)hz);
-    return;
-  }
-  if (hz < 1000000UL) {  // kHz
-    uint32_t k = hz / 1000UL;
-    uint32_t rem = hz % 1000UL;  // Hz remainder -> fractional kHz
-    if (rem == 0) {
-      snprintf(out, outSz, "%lu kHz", (unsigned long)k);
-    } else {
-      char frac[4];
-      snprintf(frac, sizeof(frac), "%03lu", (unsigned long)rem);  // 3 decimals
-      int len = 3;
-      while (len > 0 && frac[len - 1] == '0') frac[--len] = '\0';
-      snprintf(out, outSz, "%lu.%s kHz", (unsigned long)k, frac);
-    }
-    return;
-  }
-  // MHz
-  uint32_t m = hz / 1000000UL;
-  uint32_t rem = hz % 1000000UL;  // 0..999999 Hz -> fractional MHz
-  if (rem == 0) {
-    snprintf(out, outSz, "%lu MHz", (unsigned long)m);
-  } else {
-    // Show kHz as the fractional part (3 decimals), trim trailing zeros
-    uint32_t frac = rem / 1000UL;  // 0..999 kHz
-    char frac3[4];
-    snprintf(frac3, sizeof(frac3), "%03lu", (unsigned long)frac);
-    int len = 3;
-    while (len > 0 && frac3[len - 1] == '0') frac3[--len] = '\0';
-    if (len == 0) {
-      snprintf(out, outSz, "%lu MHz", (unsigned long)m);
-    } else {
-      snprintf(out, outSz, "%lu.%s MHz", (unsigned long)m, frac3);
-    }
-  }
-}
-void displayfreq() {
-  unsigned long df = uiDisplayFreqHz();
-  unsigned int m = df / 1000000UL;
-  unsigned int k = (df % 1000000UL) / 1000UL;
-  unsigned int h = (df % 1000UL) / 1UL;
-
-  display.clearDisplay();
-  display.setTextSize(2);
-
-  char buffer[15] = "";
-  if (m < 1) {
-    display.setCursor(41, 1);
-    sprintf(buffer, "%003d.%003d", k, h);
-  } else if (m < 100) {
-    display.setCursor(5, 1);
-    sprintf(buffer, "%2d.%003d.%003d", m, k, h);
-  } else if (m >= 100) {
-    unsigned int h2 = (df % 1000UL) / 10UL;
-    display.setCursor(5, 1);
-    sprintf(buffer, "%2d.%003d.%02d", m, k, h2);
-  }
-  display.print(buffer);
-}
-void setstep() {
-  switch (stp) {
-    case 1:
-      stp = 2;
-      fstep = 1;
-      break;
-    case 2:
-      stp = 3;
-      fstep = 10;
-      break;
-    case 3:
-      stp = 4;
-      fstep = 1000;
-      break;
-    case 4:
-      stp = 5;
-      fstep = 5000;
-      break;
-    case 5:
-      stp = 6;
-      fstep = 10000;
-      break;
-    case 6:
-      stp = 7;
-      fstep = 100000;
-      break;
-    case 7:
-      stp = 8;
-      fstep = 1000000;
-      break;
-    case 8:
-      stp = 1;
-      fstep = 10000000;
-      break;
-  }
-}
-void inc_preset() {
-  count++;
-  if (count > 21) count = 1;
-  bandpresets();
-  delay(50);
-}
-void bandpresets() {
-  switch (count) {
-    case 1: freq = 100000; break;
-    case 2: freq = 800000; break;
-    case 3: freq = 1800000; break;
-    case 4: freq = 3650000; break;
-    case 5: freq = 4985000; break;
-    case 6: freq = 6180000; break;
-    case 7: freq = 7200000; break;
-    case 8: freq = 10000000; break;
-    case 9: freq = 11780000; break;
-    case 10: freq = 13630000; break;
-    case 11: freq = 14100000; break;
-    case 12: freq = 15000000; break;
-    case 13: freq = 17655000; break;
-    case 14: freq = 21525000; break;
-    case 15: freq = 27025000; break;
-    case 16: freq = 28400000; break;
-    case 17: freq = 50000000; break;
-    case 18: freq = 107700000; break;
-    case 19: freq = 130000000; break;
-    case 20: freq = 144000000; break;
-    case 21: freq = 220000000; break;
-  }
-  stp = 4;
-  setstep();
-}
-void layout() {
-  display.setTextColor(WHITE);
-  display.drawLine(0, 20, 127, 20, WHITE);
-  display.drawLine(0, 43, 127, 43, WHITE);
-  display.drawLine(105, 24, 105, 39, WHITE);
-  display.drawLine(87, 24, 87, 39, WHITE);
-  display.drawLine(87, 48, 87, 63, WHITE);
-  display.drawLine(15, 55, 82, 55, WHITE);
-  display.setTextSize(1);
-  display.setCursor(59, 23);
-  display.print("STEP");
-  display.setCursor(51, 33);
-  if (stp == 2) display.print("  1Hz");
-  if (stp == 3) display.print(" 10Hz");
-  if (stp == 4) display.print(" 1kHz");
-  if (stp == 5) display.print(" 5kHz");
-  if (stp == 6) display.print("10kHz");
-  if (stp == 7) display.print("100kHz");
-  if (stp == 8) display.print(" 1MHz");
-  if (stp == 1) display.print(" 10MHz");
-
-  display.setTextSize(1);
-  display.setCursor(92, 48);
-  display.print("IF:");
-  display.setCursor(92, 57);
-  display.print(interfreq);
-  display.print("k");
-
-  display.setTextSize(1);
-  display.setCursor(110, 23);
-  if (freq < 1000000) display.print("kHz");
-  if (freq >= 1000000) display.print("MHz");
-  display.setCursor(110, 33);
-  if (interfreq == 0) display.print("VFO");
-  if (interfreq != 0) display.print("L O");
-
-  display.setCursor(91, 28);
-  if (!sts) display.print("RX");
-  if (!sts) interfreq = IF;
-  if (sts) display.print("TX");
-  if (sts) interfreq = 0;
-
-  bandlist();
-  drawbargraph();
-  drawScanUiOverlay();
-  display.display();
-}
-void bandlist() {
-  display.setTextSize(2);
-  display.setCursor(0, 25);
-  if (count == 1) display.print("GEN");
-  if (count == 2) display.print("MW");
-  if (count == 3) display.print("160m");
-  if (count == 4) display.print("80m");
-  if (count == 5) display.print("60m");
-  if (count == 6) display.print("49m");
-  if (count == 7) display.print("40m");
-  if (count == 8) display.print("31m");
-  if (count == 9) display.print("25m");
-  if (count == 10) display.print("22m");
-  if (count == 11) display.print("20m");
-  if (count == 12) display.print("19m");
-  if (count == 13) display.print("16m");
-  if (count == 14) display.print("13m");
-  if (count == 15) display.print("11m");
-  if (count == 16) display.print("10m");
-  if (count == 17) display.print("6m");
-  if (count == 18) display.print("WFM");
-  if (count == 19) display.print("AIR");
-  if (count == 20) display.print("2m");
-  if (count == 21) display.print("1m");
-  if (count == 1) interfreq = 0;
-  else if (!sts) interfreq = IF;
-}
-void drawbargraph() {
-  byte y = map(n, 1, 42, 1, 14);
-
-  display.setTextSize(1);
-  display.setCursor(0, 48);
-  display.print("TU");
-
-  switch (y) {
-    case 1: display.fillRect(15, 48, 2, 6, WHITE); break;
-    case 2: display.fillRect(20, 48, 2, 6, WHITE); break;
-    case 3: display.fillRect(25, 48, 2, 6, WHITE); break;
-    case 4: display.fillRect(30, 48, 2, 6, WHITE); break;
-    case 5: display.fillRect(35, 48, 2, 6, WHITE); break;
-    case 6: display.fillRect(40, 48, 2, 6, WHITE); break;
-    case 7: display.fillRect(45, 48, 2, 6, WHITE); break;
-    case 8: display.fillRect(50, 48, 2, 6, WHITE); break;
-    case 9: display.fillRect(55, 48, 2, 6, WHITE); break;
-    case 10: display.fillRect(60, 48, 2, 6, WHITE); break;
-    case 11: display.fillRect(65, 48, 2, 6, WHITE); break;
-    case 12: display.fillRect(70, 48, 2, 6, WHITE); break;
-    case 13: display.fillRect(75, 48, 2, 6, WHITE); break;
-    case 14: display.fillRect(80, 48, 2, 6, WHITE); break;
-  }
-
-  display.setCursor(0, 57);
-  display.print("SM");
-  switch (x) {
-    case 14: display.fillRect(80, 58, 2, 6, WHITE);
-    case 13: display.fillRect(75, 58, 2, 6, WHITE);
-    case 12: display.fillRect(70, 58, 2, 6, WHITE);
-    case 11: display.fillRect(65, 58, 2, 6, WHITE);
-    case 10: display.fillRect(60, 58, 2, 6, WHITE);
-    case 9: display.fillRect(55, 58, 2, 6, WHITE);
-    case 8: display.fillRect(50, 58, 2, 6, WHITE);
-    case 7: display.fillRect(45, 58, 2, 6, WHITE);
-    case 6: display.fillRect(40, 58, 2, 6, WHITE);
-    case 5: display.fillRect(35, 58, 2, 6, WHITE);
-    case 4: display.fillRect(30, 58, 2, 6, WHITE);
-    case 3: display.fillRect(25, 58, 2, 6, WHITE);
-    case 2: display.fillRect(20, 58, 2, 6, WHITE);
-    case 1: display.fillRect(15, 58, 2, 6, WHITE);
-    default: display.fillRect(15, 58, 2, 6, WHITE);
-  }
 }
