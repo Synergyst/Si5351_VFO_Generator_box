@@ -9,29 +9,28 @@
 #include "string_switch.h"
 
 // ==================== Defines ====================
-#define FW_VERSION "1.0.7"  // Our firmware version
-#define IF 10700            // Inter-Frequency in kHz
-#define BAND_INIT 18        // Initial band preset
-#define STEP_INIT 6         // Initial step size preset
-#define XT_CAL_F 0          // XTAL ppm drift calibration amount
-#define S_GAIN 505          // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
-#define SM_ADC A1           // Signal Meter ADC pin
-#define rotLeft 6           // Rotary-left pin
-#define rotRight 7          // Rotary-right pin
-#define LED_PIN 16          // WS2812 LED pin
-#define LED_COUNT 1         // The WaveShare RP2040 Zero only has the one LED
-#define WAIT_USB_SERIAL 0   // Wait for a client to connect to USB serial connsole
-#define BAUD 9600           // USB serial baud rate
+#define FW_VERSION "1.0.7"     // Our firmware version
+#define IF 10700               // Inter-Frequency in kHz
+#define BAND_INIT 18           // Initial band preset
+#define STEP_INIT 6            // Initial step size preset
+#define XT_CAL_F 0             // XTAL ppm drift calibration amount
+#define S_GAIN 505             // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
+#define SM_ADC A0              // Signal Meter ADC pin
+#define rotLeft 6              // Rotary-left pin
+#define rotRight 7             // Rotary-right pin
+#define LED_PIN 16             // WS2812 LED pin
+#define LED_COUNT 1            // The WaveShare RP2040 Zero only has the one LED
+#define WAIT_USB_SERIAL false  // Wait for a client to connect to USB serial connsole
+#define BAUD 9600              // USB serial baud rate
 
 // ==================== Tuner variables ====================
 unsigned long freq, freqold, fstep;
 long interfreq = IF, interfreqold = 0;
 static long lastSentIF = -1;
 long cal = XT_CAL_F;
-unsigned int smval;
 byte encoder = 1;
 byte stp, n = 1;
-byte count, x, xo;
+byte count, sigmeter, sigmeterOld;
 bool sts = 0;
 unsigned int period = 100;
 unsigned long time_now = 0;
@@ -245,7 +244,7 @@ void setup() {
   // Saved ttyRows/ttyCols/ANSI are already applied to globals.
 
   // ==================== Display init ====================
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3D*/);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3C*/);
   display.clearDisplay();
   display.setTextColor(WHITE);
   display.display();
@@ -296,7 +295,7 @@ void loop() {
     handleCommand(sUsbBuf, Serial);
   }
 
-  cfgTick();      // ==================== Flush pending config saves (debounced to reduce wear) ====================
+  cfgTick();      // ==================== Flush pending config saves with rate-limits to reduce wear ====================
   pollEncoder();  // ==================== Rotary encoder polling ====================
   uiScanTick();   // ==================== Scanner tick ====================
   tuiTick();      // ==================== Terminal UI tick ====================
@@ -320,10 +319,10 @@ void loop() {
     tuiMarkDirty();  // reflect changes to TUI
   }
 
-  // ==================== ??? changed, ??? now ====================
-  if (xo != x) {
+  // ==================== SM changed, adjust SM now ====================
+  if (sigmeterOld != sigmeter) {
     time_now = millis();
-    xo = x;
+    sigmeterOld = sigmeter;
     tuiMarkDirty();  // reflect changes to TUI
   }
 
@@ -335,6 +334,34 @@ void loop() {
     displayfreq();
     layout();
   }
+
+  /*float sensorValue = analogRead(SM_ADC);          // Read analog input on SM_ADC
+  float voltage1 = sensorValue * (3.03 / 1023.0);  // Convert analog reading to voltage
+  float voltage = voltage1 / 2;                    // Divide by 2 because of 2x opamp on input
+  // Calculate dBm, power in uW, mW, and W
+  double dBm = (40 * voltage - 40);
+  double Pu = pow(10.0, (dBm + 30) / 10.0);
+  double Pm = pow(10.0, dBm / 10.0);
+  double Pw = pow(10.0, (dBm - 30) / 10.0);
+  // Print voltage and dBm on the Serial monitor
+  Serial.printf("Volt: %.2f\tdBm: %.2f\t(", voltage, dBm);
+  if (dBm <= 0) {
+    // If dBm is less than or equal to 0, display power in uW
+    Serial.printf("%.2f", Pu);
+    if (dBm <= 0) {
+      Serial.println("\tuW)");
+    }
+  } else if (dBm >= 30) {
+    // If dBm is greater than or equal to 30, display power in W
+    Serial.printf("%.2f", Pw);
+    if (dBm >= 30) {
+      Serial.println("\tW)");
+    }
+  } else {
+    // Otherwise, display power in mW
+    Serial.printf("%.2f", Pm);
+    Serial.println("\tmW)");
+  }*/
 }
 
 // ==================== UI Scanner ====================
@@ -671,31 +698,34 @@ void bandlist() {
 }
 void drawbargraph() {
   byte y = map(n, 1, 42, 1, 14);
-
   display.setTextSize(1);
-  display.setCursor(0, 48);
-  display.print("TU");
 
-  switch (y) {
-    case 1: display.fillRect(15, 48, 2, 6, WHITE); break;
-    case 2: display.fillRect(20, 48, 2, 6, WHITE); break;
-    case 3: display.fillRect(25, 48, 2, 6, WHITE); break;
-    case 4: display.fillRect(30, 48, 2, 6, WHITE); break;
-    case 5: display.fillRect(35, 48, 2, 6, WHITE); break;
-    case 6: display.fillRect(40, 48, 2, 6, WHITE); break;
-    case 7: display.fillRect(45, 48, 2, 6, WHITE); break;
-    case 8: display.fillRect(50, 48, 2, 6, WHITE); break;
-    case 9: display.fillRect(55, 48, 2, 6, WHITE); break;
-    case 10: display.fillRect(60, 48, 2, 6, WHITE); break;
-    case 11: display.fillRect(65, 48, 2, 6, WHITE); break;
-    case 12: display.fillRect(70, 48, 2, 6, WHITE); break;
-    case 13: display.fillRect(75, 48, 2, 6, WHITE); break;
-    case 14: display.fillRect(80, 48, 2, 6, WHITE); break;
+  // show dBm and power
+  display.setCursor(0, 46);
+  float sensorValue = analogRead(SM_ADC);          // Read analog input on SM_ADC
+  float voltage1 = sensorValue * (3.03 / 1023.0);  // Convert analog reading to voltage
+  float voltage = voltage1 / 2.0;                  // Divide by 2 due to 2x opamp on input
+  double dBm = (40.0 * voltage - 40.0);
+  display.print(dBm, 1);  // dBm value
+  // Power value
+  display.print(" (");
+  if (dBm <= 0) {
+    double Pu = pow(10.0, (dBm + 30.0) / 10.0);
+    display.print(Pu, 2);
+    display.print("uW)");
+  } else if (dBm >= 30) {
+    double Pw = pow(10.0, (dBm - 30.0) / 10.0);
+    display.print(Pw, 2);
+    display.print("W)");
+  } else {
+    double Pm = pow(10.0, dBm / 10.0);
+    display.print(Pm, 2);
+    display.print("mW)");
   }
 
   display.setCursor(0, 57);
   display.print("SM");
-  switch (x) {
+  switch (sigmeter) {
     case 14: display.fillRect(80, 58, 2, 6, WHITE);
     case 13: display.fillRect(75, 58, 2, 6, WHITE);
     case 12: display.fillRect(70, 58, 2, 6, WHITE);
@@ -759,7 +789,7 @@ static void cfgApply(const CfgV1& c) {
   int32_t ifKHz = clampIfKHz(c.if_khz);
   uint8_t stpIdx = (c.stp_idx >= 1 && c.stp_idx <= 8) ? c.stp_idx : 4;
   uint8_t bc = (c.band_count >= 1 && c.band_count <= 21) ? c.band_count : count;
-  uint8_t smx = (c.s_meter_x >= 1 && c.s_meter_x <= 14) ? c.s_meter_x : x;
+  uint8_t smx = (c.s_meter_x >= 1 && c.s_meter_x <= 14) ? c.s_meter_x : sigmeter;
   uint8_t scanSrc = (c.scan_src ? 1 : 0);
   uint32_t scanDelay = clampScanDelay(c.scan_delay_ms);
   uint16_t cr = clampRows(c.tty_rows);
@@ -773,7 +803,7 @@ static void cfgApply(const CfgV1& c) {
   stp = stpIdx;
   fstep = stepIndexToFstep(stpIdx);
   count = bc;
-  x = smx;
+  sigmeter = smx;
   uiScanSrc = scanSrc;
   uiScanDelayMs = scanDelay;
   tuiAnsi = (c.tty_ansi != 0);
@@ -793,7 +823,7 @@ static void cfgFillFromGlobals(CfgV1& c) {
   c.if_khz = clampIfKHz(interfreq);
   c.stp_idx = stp;
   c.band_count = count;
-  c.s_meter_x = (x >= 1 && x <= 14) ? x : 1;
+  c.s_meter_x = (sigmeter >= 1 && sigmeter <= 14) ? sigmeter : 1;
   c.scan_src = uiScanSrc ? 1 : 0;
   c.scan_delay_ms = clampScanDelay(uiScanDelayMs);
   c.tty_rows = clampRows(tuiRows);
@@ -1141,7 +1171,7 @@ static void drawBars(Stream& s) {
   clearRegion(s, 10, px, tuiPanelW);
   vtMove(s, 10, px);
   s.print("SM ");
-  for (int i = 1; i <= 14; ++i) s.print(i <= x ? '|' : '.');
+  for (int i = 1; i <= 14; ++i) s.print(i <= sigmeter ? '|' : '.');
 }
 static void drawLog(Stream& s) {
   const uint16_t logW = tuiLogWidth();
@@ -2045,7 +2075,7 @@ void handleCommand(const char* line, Stream& io) {
     } else if (!strcmp(key, "SIGMETER") && matched == 2) {
       if (val < 1) val = 1;
       if (val > 14) val = 14;
-      x = (byte)val;
+      sigmeter = (byte)val;
       cfgMarkDirty();  // persist stp/fstep
       time_now = millis();
       termPrompt();
