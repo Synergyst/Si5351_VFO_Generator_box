@@ -6,6 +6,7 @@
 #include <math.h>               // Standard math library
 #include <stdarg.h>
 #include <string.h>
+#include "string_switch.h"
 
 // ==================== Defines ====================
 #define FW_VERSION "1.0.6"  // Our firmware version
@@ -59,18 +60,21 @@ static uint32_t uiScanLastMs = 0;              // Last scan cycle in millisecond
 static size_t uiScanIdx = 0;                   // Current list index
 static uint32_t uiScanCurrFreqHz = 0;          // Current scanner frequency in Hertz
 static size_t uiCustomScanLen = 0;             // Length of custom scan list
-// FM broadcast + NOAA (WX needs to be commented out for now until we can get a programmable DSP)
-/*static const uint32_t uiHardScanList[] PROGMEM = {
+static const uint32_t uiHardScanListFM[] PROGMEM = {
+  // FM broadcast
   96300000UL,   // 96.3 MHz -
   102500000UL,  // 102.5 MHz -
   103300000UL,  // 103.3 MHz -
   104100000UL,  // 104.1 MHz -
   106500000UL,  // 106.5 MHz -
   107700000UL,  // 107.7 MHz -
-  162550000UL   // 162.550 MHz - NOAA WX Ch 7
-};*/
-// CB 40-channel
-static const uint32_t uiHardScanList[] PROGMEM = {
+};
+static const uint32_t uiHardScanListNOAA[] PROGMEM = {
+  // NOAA
+  162550000UL  // 162.550 MHz - NOAA WX Ch 7
+};
+static const uint32_t uiHardScanListCB[] PROGMEM = {
+  // CB 40-channel
   26965000UL,  // 26.965 MHz - CB Channel 1
   26975000UL,  // 26.975 MHz - CB Channel 2
   26985000UL,  // 26.985 MHz - CB Channel 3
@@ -112,8 +116,8 @@ static const uint32_t uiHardScanList[] PROGMEM = {
   27385000UL,  // 27.385 MHz - CB Channel 39
   27405000UL   // 27.405 MHz - CB Channel 40
 };
-static const size_t uiHardScanLen = sizeof(uiHardScanList) / sizeof(uiHardScanList[0]);  // Hard scan list length
-static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                    // Custom scanner list
+static const size_t uiHardScanLen = sizeof(uiHardScanListCB) / sizeof(uiHardScanListCB[0]);  // Hard scan list length
+static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                        // Custom scanner list
 
 // ==================== Terminal TUI ====================
 static bool tuiEnabled = false;                 // TUI master switch
@@ -180,8 +184,8 @@ static bool sCfgLoaded = false;                         // is configuration file
 static bool sCfgDirty = false;                          // is configuration file dirty
 static unsigned long sCfgDirtySince = 0;                // time in milliseconds since config was dirty
 static unsigned long sCfgLastSave = 0;                  // time in milliseconds since config was last saved
-static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // min gap between writes
-static const unsigned long CFG_DEBOUNCE_MS = 1000;      // delay after last change before saving
+static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // minimum gap in milliseconds between writes
+static const unsigned long CFG_DEBOUNCE_MS = 5000;      // delay after last change before saving
 static inline unsigned long stepIndexToFstep(uint8_t stpIdx) {
   // Helper: map step index -> step size (Hz), mirrors your setstep() table without cycling
   switch (stpIdx) {
@@ -1131,12 +1135,16 @@ static void sendScanStatus(Stream& io) {
   const size_t len = uiCurrentListLen();
   char buf[32];
   formatFreqSmart(uiScanCurrFreqHz, buf, sizeof(buf));
-  io.printf("Scan: %s\n", uiScanOn ? "ON" : "OFF");
-  io.printf("  Source: %s\n", uiScanSrc ? "CUSTOM" : "HARD");
-  io.printf("  Delay: %lu ms\n", (unsigned long)uiScanDelayMs);
-  io.printf("  Length: %lu\n", (unsigned long)len);
-  io.printf("  Index: %lu\n", (unsigned long)uiScanIdx);
-  if (uiScanOn) io.printf("  Current: %lu Hz (%s)\n", (unsigned long)uiScanCurrFreqHz, buf);
+  io.printf("Scan: %s, ", uiScanOn ? "ON" : "OFF");
+  io.printf("Source: %s, ", uiScanSrc ? "CUSTOM" : "HARD");
+  io.printf("Delay: %lu ms, ", (unsigned long)uiScanDelayMs);
+  io.printf("Length: %lu, ", (unsigned long)len);
+  io.printf("Index: %lu", (unsigned long)uiScanIdx);
+  if (uiScanOn) {
+    io.printf(", Current: %lu Hz (%s)\n", (unsigned long)uiScanCurrFreqHz, buf);
+  } else {
+    io.printf("\n");
+  }
 }
 static void termPrompt() {
   // Helper: show prompt in plain mode
@@ -1224,12 +1232,26 @@ void handleCommand(const char* line, Stream& io) {
   }
   // ==================== I2C device scanner ====================
   if (!strcmp(line, "I2C?") && fromUSB) {
+    Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
+    int i2cDevsFound = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
       Wire.beginTransmission(addr);
       if (Wire.endTransmission() == 0) {
-        outPrintf("RP2040Zero (boot): Detected I2C device on bus: 0x%02X\n", addr);
+        if (i2cDevsFound >= 1) {
+          Serial.print(", 0x");
+          Serial.print(addr, HEX);
+        } else {
+          Serial.print("0x");
+          Serial.print(addr, HEX);
+        }
+        display.print("0x");
+        display.print(addr, HEX);
+        display.print(" ");
+        display.display();
+        i2cDevsFound++;
       }
     }
+    Serial.println();
     time_now = millis();
     termPrompt();
     tuiMarkDirty();
@@ -1584,21 +1606,23 @@ void setup() {
   display.setCursor(0, 0);
   display.print("RP2040 I2C device(s):");
   display.setCursor(0, 12);
-  Serial.print("RP2040Zero (boot): Detected I2C device(s):");
+  Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
+  int i2cDevsFound = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
-      if (addr == 1) {
-        Serial.print("0x");
+      if (i2cDevsFound >= 1) {
+        Serial.print(", 0x");
         Serial.print(addr, HEX);
       } else {
-        Serial.print(", 0x");
+        Serial.print("0x");
         Serial.print(addr, HEX);
       }
       display.print("0x");
       display.print(addr, HEX);
       display.print(" ");
       display.display();
+      i2cDevsFound++;
     }
   }
   Serial.println();
@@ -1663,7 +1687,41 @@ static inline size_t uiCurrentListLen() {
   return uiScanSrc ? uiCustomScanLen : uiHardScanLen;
 }
 static inline const uint32_t* uiCurrentListPtr() {
-  return uiScanSrc ? uiCustomScanList : uiHardScanList;
+  return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+}
+static inline const uint32_t* uiCurrentListPtr(const String& band) {
+  // String overload
+  STR_SWITCH(band)
+  STR_CASE("FM") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListFM;
+  }
+  STR_CASE("NOAA") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListNOAA;
+  }
+  STR_CASE("CB") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_DEFAULT {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_SWITCH_END;
+}
+static inline const uint32_t* uiCurrentListPtr(const char* band) {
+  // C-string overload
+  STR_SWITCH(band)
+  STR_CASE("FM") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListFM;
+  }
+  STR_CASE("NOAA") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListNOAA;
+  }
+  STR_CASE("CB") {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_DEFAULT {
+    return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  }
+  STR_SWITCH_END;
 }
 static inline void uiScanUse(uint8_t src) {
   uiScanSrc = src ? 1 : 0;
