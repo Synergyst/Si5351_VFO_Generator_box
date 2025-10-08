@@ -9,7 +9,7 @@
 #include "string_switch.h"
 
 // ==================== Defines ====================
-#define FW_VERSION "1.0.7"     // Our firmware version
+#define FW_VERSION "1.0.8"     // Our firmware version
 #define IF 10700               // Inter-Frequency in kHz
 #define BAND_INIT 18           // Initial band preset
 #define STEP_INIT 6            // Initial step size preset
@@ -149,6 +149,31 @@ enum {
   TUI_DIRTY_INPUT = 1 << 5,
   TUI_DIRTY_FULL = 1 << 15
 };
+
+// ==================== Power/DBM sampling constants ====================
+#define ADC_VREF 3.03f       // your original 3.03 reference
+#define SM_INPUT_DIV 0.505f  // 2x opamp gain -> divide measured voltage by 2
+#define DBM_SLOPE 40.0f      // dBm = slope * V + offset -> from your formula
+#define DBM_OFFSET -40.0f
+
+// ==================== Power/DBM sampling state ====================
+static float gSmVolt = 0.0f;       // input voltage at MCU pin (after Vref scaling and divider)
+static float gDbmNow = -99.0f;     // instantaneous dBm (unsmoothed)
+static float gDbmSmooth = -99.0f;  // smoothed dBm for display
+static float gPowerW = 0.0f;       // power in watts (from smoothed dBm)
+static uint8_t gPwrBar = 0;        // 0..14 bar for TTY/OLED
+static char gPowerStr[16] = "";    // compact text power (uW/mW/W)
+
+// ==================== Top-3 peaks during scan (RAM only, for now) ====================
+struct PeakEntry {
+  uint16_t idx;     // index into current scan list
+  uint32_t freqHz;  // cached frequency for convenience
+  float dbm;        // peak dBm observed for this index
+  float watts;      // computed watts for this index peak
+  uint8_t valid;    // 0/1
+};
+static PeakEntry gScanPeaks[3];           // Top peaks detected
+static bool gScanPeaksNeedsSave = false;  // for future flash persistence
 
 // ==================== I2C devices ====================
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire);  // SSD1306 OLED mono display (128x64 resolution)
@@ -298,6 +323,7 @@ void loop() {
   cfgTick();      // ==================== Flush pending config saves with rate-limits to reduce wear ====================
   pollEncoder();  // ==================== Rotary encoder polling ====================
   uiScanTick();   // ==================== Scanner tick ====================
+  pwrTick();      // ==================== AD8307 meter tick ====================
   tuiTick();      // ==================== Terminal UI tick ====================
 
   // ==================== Frequency changed, retune now ====================
@@ -413,6 +439,8 @@ static void uiScanStart() {
   uiScanOn = true;
   uiScanIdx = 0;
   uiScanLastMs = millis() - uiScanDelayMs;
+  scanPeaksReset();  // start fresh peaks for this scan session
+  tuiMarkDirty();    // update TUI panel
 }
 static void uiScanStop() {
   uiScanOn = false;
@@ -700,28 +728,12 @@ void drawbargraph() {
   byte y = map(n, 1, 42, 1, 14);
   display.setTextSize(1);
 
-  // show dBm and power
+  // show dBm and power (using smoothed shared state)
   display.setCursor(0, 46);
-  float sensorValue = analogRead(SM_ADC);          // Read analog input on SM_ADC
-  float voltage1 = sensorValue * (3.03 / 1023.0);  // Convert analog reading to voltage
-  float voltage = voltage1 / 2.0;                  // Divide by 2 due to 2x opamp on input
-  double dBm = (40.0 * voltage - 40.0);
-  display.print(dBm, 1);  // dBm value
-  // Power value
-  display.print(" (");
-  if (dBm <= 0) {
-    double Pu = pow(10.0, (dBm + 30.0) / 10.0);
-    display.print(Pu, 2);
-    display.print("uW)");
-  } else if (dBm >= 30) {
-    double Pw = pow(10.0, (dBm - 30.0) / 10.0);
-    display.print(Pw, 2);
-    display.print("W)");
-  } else {
-    double Pm = pow(10.0, dBm / 10.0);
-    display.print(Pm, 2);
-    display.print("mW)");
-  }
+  display.print(gDbmSmooth, 1);  // dBm value, 1 decimal
+  display.print(" dBm (");
+  display.print(gPowerStr);  // compact power string
+  display.print(")");
 
   display.setCursor(0, 57);
   display.print("SM");
@@ -1172,6 +1184,17 @@ static void drawBars(Stream& s) {
   vtMove(s, 10, px);
   s.print("SM ");
   for (int i = 1; i <= 14; ++i) s.print(i <= sigmeter ? '|' : '.');
+
+  // PWR bar + numeric readout (dbm + compact power)
+  clearRegion(s, 11, px, tuiPanelW);
+  vtMove(s, 11, px);
+  s.print("PWR ");
+  for (int i = 1; i <= 14; ++i) s.print(i <= gPwrBar ? '|' : '.');
+
+  // trailing text: "  -12.3 dBm (123.45uW)" etc.
+  char tail[64];
+  snprintf(tail, sizeof(tail), "  %.1f dBm (%s)", (double)gDbmSmooth, gPowerStr);
+  s.print(tail);
 }
 static void drawLog(Stream& s) {
   const uint16_t logW = tuiLogWidth();
@@ -1248,6 +1271,7 @@ static void tuiRedrawFull() {
   vtClear(Serial);
   drawHeader(Serial);
   drawScanRow(Serial);
+  drawScanPeaks(Serial);
   //drawFreqBlock(Serial);
   drawBars(Serial);
   drawLog(Serial);
@@ -1262,6 +1286,7 @@ static void tuiRedrawDynamic() {
   // No vtClear here; dynamic should be partial updates only
   drawHeader(Serial);
   drawScanRow(Serial);
+  drawScanPeaks(Serial);
   //drawFreqBlock(Serial);
   drawBars(Serial);
   drawLog(Serial);
@@ -1283,6 +1308,7 @@ static void tuiRedrawDirty() {
     vtClear(Serial);
     drawHeader(Serial);
     drawScanRow(Serial);
+    drawScanPeaks(Serial);
     //drawFreqBlock(Serial);
     drawBars(Serial);
     drawLog(Serial);
@@ -1298,6 +1324,7 @@ static void tuiRedrawDirty() {
   }
   if (tuiDirtyMask & TUI_DIRTY_SCAN) {
     drawScanRow(Serial);
+    drawScanPeaks(Serial);
     tuiDirtyClear(TUI_DIRTY_SCAN);
   }
   /*if (tuiDirtyMask & TUI_DIRTY_FREQ) {
@@ -1336,6 +1363,41 @@ static void tuiTick() {
   }
 
   // Nothing to update: do not touch the terminal at all.
+}
+static void drawScanPeaks(Stream& s) {
+  const uint16_t px = tuiPanelX();
+  // We'll render at rows 3..5
+  for (int r = 3; r <= 5; ++r) clearRegion(s, r, px, tuiPanelW);
+
+  if (!uiScanOn) {
+    vtMove(s, 3, px);
+    s.print("Peaks: (idle)");
+    return;
+  }
+
+  vtMove(s, 3, px);
+  s.print("Peaks:");
+  // Up to 3 entries
+  for (int i = 0; i < 3; ++i) {
+    const int row = 3 + i;
+    clearRegion(s, row, px, tuiPanelW);
+    vtMove(s, row, px);
+    if (!gScanPeaks[i].valid) {
+      s.printf("%d: --", i + 1);
+      continue;
+    }
+    char pw[24];
+    formatPowerShort(gScanPeaks[i].dbm, gScanPeaks[i].watts, pw, sizeof(pw));
+    // Example line: "1:[12] -23.4 dBm (45.67uW)  162.550 MHz"
+    char fbuf[32];
+    formatFreqSmart(gScanPeaks[i].freqHz, fbuf, sizeof(fbuf));
+    s.printf("%d:[%u] %.1f dBm (%s)  %s",
+             i + 1,
+             (unsigned)gScanPeaks[i].idx,
+             (double)gScanPeaks[i].dbm,
+             pw,
+             fbuf);
+  }
 }
 // ==================== Improved terminal line reader (echo-aware) ====================
 static inline bool isPrintableAscii(char c) {
@@ -1424,6 +1486,172 @@ bool readLine(Stream& s, char* outBuf, size_t& inoutLen, size_t outSz) {
   return false;
 }
 // ==================== TUI section end ====================
+
+// ==================== AD8307 metering ====================
+static void updatePowerFromADC() {
+  // Sample ADC and compute voltage at MCU pin
+  uint16_t raw = analogRead(SM_ADC);
+  float v_mcu = ((float)raw) * (ADC_VREF / 1023.0f);
+  float v_in = v_mcu / SM_INPUT_DIV;  // actual input voltage after op-amp
+
+  // dBm = 40*V - 40 (your original)
+  float dbm = (DBM_SLOPE * v_in) + DBM_OFFSET;
+
+  // Initialize smoothing once, then low-pass filter
+  static bool inited = false;
+  if (!inited) {
+    gDbmSmooth = dbm;
+    inited = true;
+  } else {
+    // Gentle smoothing to reduce flicker; tune alpha if needed
+    const float alpha = 0.15f;
+    gDbmSmooth = (1.0f - alpha) * gDbmSmooth + alpha * dbm;
+  }
+
+  gSmVolt = v_in;
+  gDbmNow = dbm;
+
+  // Power from smoothed dBm
+  // mW = 10^(dBm/10); W = mW/1000
+  float mW = powf(10.0f, gDbmSmooth / 10.0f);
+  gPowerW = mW / 1000.0f;
+
+  // Format power string like your OLED logic: uW for <=0 dBm, mW for <30 dBm, W for >=30 dBm
+  if (gDbmSmooth <= 0.0f) {
+    float uW = mW * 1000.0f;
+    snprintf(gPowerStr, sizeof(gPowerStr), "%.2fuW", (double)uW);
+  } else if (gDbmSmooth >= 30.0f) {
+    snprintf(gPowerStr, sizeof(gPowerStr), "%.2fW", (double)gPowerW);
+  } else {
+    snprintf(gPowerStr, sizeof(gPowerStr), "%.2fmW", (double)mW);
+  }
+
+  // Map dBm to 0..14 bar. Example: -80..+10 dBm -> 0..14
+  int bar = (int)roundf((gDbmSmooth + 80.0f) * (14.0f / 90.0f));
+  if (bar < 0) bar = 0;
+  if (bar > 14) bar = 14;
+  gPwrBar = (uint8_t)bar;
+}
+static void pwrTick() {
+  // Rate-limit ADC reads and mark TTY dirty if it changes
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+  if ((now - lastMs) < 100) return;  // ~10 Hz refresh
+  lastMs = now;
+
+  uint8_t prevBar = gPwrBar;
+  int prevDbm10 = (int)roundf(gDbmSmooth * 10.0f);
+
+  updatePowerFromADC();
+
+  int newDbm10 = (int)roundf(gDbmSmooth * 10.0f);
+  if (gPwrBar != prevBar || newDbm10 != prevDbm10) {
+    // Ask TTY to update bars; OLED is redrawn on its own cadence
+    tuiMarkDirty();
+  }
+
+  // record peaks while scanning
+  if (uiScanOn) {
+    size_t len = uiCurrentListLen();
+    if (len > 0 && uiScanCurrFreqHz != 0) {
+      // current index is the one we just set in uiScanTick (uiScanIdx already advanced)
+      uint16_t currIdx = (uint16_t)((uiScanIdx + len - 1) % len);
+      scanPeaksConsider(currIdx, uiScanCurrFreqHz, gDbmSmooth, gPowerW);
+    }
+  }
+}
+static void scanPeaksReset() {
+  for (int i = 0; i < 3; ++i) {
+    gScanPeaks[i].valid = 0;
+    gScanPeaks[i].idx = 0;
+    gScanPeaks[i].freqHz = 0;
+    gScanPeaks[i].dbm = -999.0f;
+    gScanPeaks[i].watts = 0.0f;
+  }
+  gScanPeaksNeedsSave = false;
+}
+static void peaksMaybePersist(const PeakEntry& e) {
+  // Placeholder for future flash write. Intentionally no-op for now.
+  // Example for future:
+  //   - mark config dirty or write a dedicated "peaks" file on LittleFS
+  (void)e;
+}
+static void formatPowerShort(float dbm, float watts, char* out, size_t outSz) {
+  // mirror OLED/TUI compact unit logic
+  float mW = watts * 1000.0f;
+  if (dbm <= 0.0f) {
+    float uW = mW * 1000.0f;
+    snprintf(out, outSz, "%.2fuW", (double)uW);
+  } else if (dbm >= 30.0f) {
+    snprintf(out, outSz, "%.2fW", (double)watts);
+  } else {
+    snprintf(out, outSz, "%.2fmW", (double)mW);
+  }
+}
+static void scanPeaksConsider(uint16_t currIdx, uint32_t freqHz, float dbm, float watts) {
+  // Insert/refresh into top-3 table if this reading qualifies.
+  // Keeps unique indices, sorted by descending dBm.
+
+  if (!isfinite(dbm)) return;  // Ignore obviously bad readings
+
+  // 1) If already present, update if higher
+  int present = -1;
+  for (int i = 0; i < 3; ++i) {
+    if (gScanPeaks[i].valid && gScanPeaks[i].idx == currIdx) {
+      present = i;
+      break;
+    }
+  }
+  bool changed = false;
+
+  if (present >= 0) {
+    if (dbm > gScanPeaks[present].dbm) {
+      gScanPeaks[present].dbm = dbm;
+      gScanPeaks[present].watts = watts;
+      gScanPeaks[present].freqHz = freqHz;
+      changed = true;
+    }
+  } else {
+    // 2) Not present: find slot (invalid or weakest)
+    int slot = -1;
+    for (int i = 0; i < 3; ++i)
+      if (!gScanPeaks[i].valid) {
+        slot = i;
+        break;
+      }
+    if (slot < 0) {
+      // all valid; replace weakest if this is better
+      int weakest = 0;
+      for (int i = 1; i < 3; ++i)
+        if (gScanPeaks[i].dbm < gScanPeaks[weakest].dbm) weakest = i;
+      if (dbm > gScanPeaks[weakest].dbm) slot = weakest;
+    }
+    if (slot >= 0) {
+      gScanPeaks[slot].valid = 1;
+      gScanPeaks[slot].idx = currIdx;
+      gScanPeaks[slot].freqHz = freqHz;
+      gScanPeaks[slot].dbm = dbm;
+      gScanPeaks[slot].watts = watts;
+      changed = true;
+    }
+  }
+
+  // 3) Sort by descending dBm if changed
+  if (changed) {
+    for (int i = 0; i < 3; ++i) {
+      for (int j = i + 1; j < 3; ++j) {
+        if (gScanPeaks[j].valid && (!gScanPeaks[i].valid || gScanPeaks[j].dbm > gScanPeaks[i].dbm)) {
+          PeakEntry tmp = gScanPeaks[i];
+          gScanPeaks[i] = gScanPeaks[j];
+          gScanPeaks[j] = tmp;
+        }
+      }
+    }
+    gScanPeaksNeedsSave = true;        // for future storage hook
+    peaksMaybePersist(gScanPeaks[0]);  // optional: persist only top-1 on change, or the changed entry
+    tuiMarkDirty();                    // refresh TUI to reflect new peaks
+  }
+}
 
 // ==================== Boot Animations ====================
 static inline float easeOutCubic(float t) {
