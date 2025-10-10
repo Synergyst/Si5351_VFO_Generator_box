@@ -14,13 +14,13 @@
 #define XT_CAL_F 0             // XTAL ppm drift calibration amount
 #define S_GAIN 505             // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
 #define SM_ADC A0              // Signal Meter ADC pin
+#define LED_COUNT 1            // The WaveShare RP2040 Zero only has the one LED
+#define LED_PIN 16             // WS2812 LED pin
 #define rotLeft 14             // Rotary-left pin
 #define rotRight 13            // Rotary-right pin
 #define BAND_PIN 11            // Band selector push button pin
 #define RX_TX_PIN 10           // RX / TX mode push button pin
 #define TUNESTEP_PIN 9         // Tune step push button pin
-#define LED_PIN 16             // WS2812 LED pin
-#define LED_COUNT 1            // The WaveShare RP2040 Zero only has the one LED
 #define WAIT_USB_SERIAL false  // Wait for a client to connect to USB serial connsole
 #define BAUD 9600              // USB serial baud rate
 
@@ -61,7 +61,7 @@ static size_t uiScanIdx = 0;                   // Current list index
 static uint32_t uiScanCurrFreqHz = 0;          // Current scanner frequency in Hertz
 static size_t uiCustomScanLen = 0;             // Length of custom scan list
 static const uint32_t uiHardScanListMURS[] PROGMEM = {
-  // MURS
+  // MURS channels + old business band
   151820000UL,  // 151.820 MHz - MURS Calling (NFM)
   151880000UL,  // 151.880 MHz - MURS Safety (NFM)
   151940000UL,  // 151.940 MHz - MURS Emergency (NFM)
@@ -69,7 +69,7 @@ static const uint32_t uiHardScanListMURS[] PROGMEM = {
   154600000UL   // 154.600 MHz - MURS Green (WFM / old business band)
 };
 static const uint32_t uiHardScanListFM[] PROGMEM = {
-  // FM broadcast
+  // Various FM broadcast station(s)
   96300000UL,   // 96.3 MHz -
   102500000UL,  // 102.5 MHz -
   103300000UL,  // 103.3 MHz -
@@ -78,11 +78,11 @@ static const uint32_t uiHardScanListFM[] PROGMEM = {
   107700000UL,  // 107.7 MHz -
 };
 static const uint32_t uiHardScanListNOAA[] PROGMEM = {
-  // NOAA
+  // NOAA WX station(s)
   162550000UL  // 162.550 MHz - NOAA WX Ch 7
 };
 static const uint32_t uiHardScanListCB[] PROGMEM = {
-  // CB 40-channel
+  // Citizens Band (40-channels)
   26965000UL,  // 26.965 MHz - CB Channel 1
   26975000UL,  // 26.975 MHz - CB Channel 2
   26985000UL,  // 26.985 MHz - CB Channel 3
