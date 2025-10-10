@@ -447,6 +447,7 @@ void loop() {
   }
   watchdog_update();
 
+  // ==================== Tune step size cycle button ====================
   if (digitalRead(TUNESTEP_PIN) == LOW) {
     time_now = (millis() + 175);
     setstep();
@@ -454,6 +455,7 @@ void loop() {
   }
   watchdog_update();
 
+  // ==================== Band preset cycle button ====================
   if (digitalRead(BAND_PIN) == LOW) {
     time_now = (millis() + 175);
     inc_preset();
@@ -461,6 +463,7 @@ void loop() {
   }
   watchdog_update();
 
+  // ==================== TX/RX button ====================
   if (digitalRead(RX_TX_PIN) == LOW) {
     time_now = (millis() + 175);
     sts = 1;
@@ -870,6 +873,7 @@ void drawbargraph() {
   }*/
 }
 
+// ==================== Configuration file handlers ====================
 static inline unsigned long stepIndexToFstep(uint8_t stpIdx) {
   // Helper: map step index -> step size (Hz), mirrors your setstep() table without cycling
   switch (stpIdx) {
