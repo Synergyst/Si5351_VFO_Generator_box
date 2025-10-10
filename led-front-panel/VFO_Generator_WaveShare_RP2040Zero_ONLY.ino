@@ -7,7 +7,7 @@
 #include "string_switch.h"      // Switch-case for String/char*
 
 // ==================== Defines ====================
-#define FW_VERSION "1.1.2"     // Our firmware version
+#define FW_VERSION "1.1.4"     // Our firmware version
 #define IF 10700               // Inter-Frequency in kHz
 #define BAND_INIT 18           // Initial band preset
 #define STEP_INIT 6            // Initial step size preset
@@ -37,14 +37,14 @@ unsigned int period = 100;
 unsigned long time_now = 0;
 
 // ==================== Encoder state ====================
-static uint8_t encPrev = 0;
-static int8_t encAccum = 0;
 static const int8_t encTable[16] = {
   0, -1, +1, 0,
   +1, 0, 0, -1,
   -1, 0, 0, +1,
   0, +1, -1, 0
-};
+};                           // encoder 4-position state table
+static uint8_t encPrev = 0;  // encoder previous value
+static int8_t encAccum = 0;  // encocer accumulator value
 
 // ==================== Line Reader ====================-
 static const size_t CMD_BUF_SZ = 255;  // USB serial buffer length
@@ -128,6 +128,16 @@ static const size_t uiHardScanLen = sizeof(uiHardScanListMURS) / sizeof(uiHardSc
 static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                            // Custom scanner list
 
 // ==================== Terminal TUI ====================
+enum {
+  TUI_DIRTY_NONE = 0,
+  TUI_DIRTY_HEADER = 1 << 0,
+  TUI_DIRTY_SCAN = 1 << 1,
+  TUI_DIRTY_FREQ = 1 << 2,
+  TUI_DIRTY_BARS = 1 << 3,
+  TUI_DIRTY_LOG = 1 << 4,
+  TUI_DIRTY_INPUT = 1 << 5,
+  TUI_DIRTY_FULL = 1 << 15
+};                                              // TUI mask
 static bool tuiEnabled = false;                 // TUI master switch
 static bool tuiAnsi = true;                     // ANSI sequences allowed
 static bool tuiInAlt = false;                   // in alternate screen
@@ -147,17 +157,6 @@ static char tuiLog[TUI_LOG_MAX][TUI_LINE_MAX];  // log pane log buffer
 static size_t tuiLogHead = 0;                   // next write
 static size_t tuiLogCount = 0;                  // log pane log count
 static uint16_t tuiDirtyMask = 0;               // mask value for TUI dirty
-enum {
-  // TUI mask
-  TUI_DIRTY_NONE = 0,
-  TUI_DIRTY_HEADER = 1 << 0,
-  TUI_DIRTY_SCAN = 1 << 1,
-  TUI_DIRTY_FREQ = 1 << 2,
-  TUI_DIRTY_BARS = 1 << 3,
-  TUI_DIRTY_LOG = 1 << 4,
-  TUI_DIRTY_INPUT = 1 << 5,
-  TUI_DIRTY_FULL = 1 << 15
-};
 
 // ==================== Power/dBm sampling constants ====================
 #define ADC_VREF 3.03f     // your original 3.03 reference
@@ -173,14 +172,14 @@ static float gPowerW = 0.0f;       // power in watts (from smoothed dBm)
 static uint8_t gPwrBar = 0;        // 0..14 bar for TTY/OLED
 static char gPowerStr[16] = "";    // compact text power (uW/mW/W)
 
-// ==================== Top-3 peaks during scan (RAM only, for now) ====================
+// ==================== Top-3 peaks during scan ====================
 struct PeakEntry {
-  uint16_t idx;     // index into current scan list
-  uint32_t freqHz;  // cached frequency for convenience
-  float dbm;        // peak dBm observed for this index
-  float watts;      // computed watts for this index peak
-  uint8_t valid;    // 0/1
-};
+  uint16_t idx;                           // index into current scan list
+  uint32_t freqHz;                        // cached frequency for convenience
+  float dbm;                              // peak dBm observed for this index
+  float watts;                            // computed watts for this index peak
+  uint8_t valid;                          // 0/1
+};                                        // Peak structure format
 static PeakEntry gScanPeaks[3];           // Top peaks detected
 static bool gScanPeaksNeedsSave = false;  // for future flash persistence
 
@@ -221,6 +220,13 @@ static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // minimum gap in millis
 static const unsigned long CFG_DEBOUNCE_MS = 5000;      // delay after last change before saving config
 
 // ==================== Peaks persistence (LittleFS) ====================
+struct PeaksV1 {
+  uint32_t magic;
+  uint16_t ver;
+  uint8_t scan_src;  // 0=HARD, 1=CUSTOM (metadata only)
+  uint8_t reserved;
+  PeakEntry entries[3];
+};                                                        // peaks file version 1 file format
 static const char* PEAKS_PATH = "/peaks.bin";             // peaks location in flash
 static const uint32_t PEAKS_MAGIC = 0x504B5331;           // 'PKS1'
 static const uint16_t PEAKS_VERSION = 1;                  // peaks file format version
@@ -230,16 +236,8 @@ static unsigned long sPeaksDirtySince = 0;                // time in millisecond
 static unsigned long sPeaksLastSave = 0;                  // time in milliseconds since peaks were last saved
 static const unsigned long PEAKS_MIN_SAVE_GAP_MS = 1500;  // minimum gap in milliseconds between peaks writes
 static const unsigned long PEAKS_DEBOUNCE_MS = 5000;      // delay after last change before saving peaks
-struct PeaksV1 {
-  uint32_t magic;
-  uint16_t ver;
-  uint8_t scan_src;  // 0=HARD, 1=CUSTOM (metadata only)
-  uint8_t reserved;
-  PeakEntry entries[3];
-};  // peaks file version 1 file format
 
 // ==================== Watchdog timer ====================
-constexpr uint32_t WDT_TIMEOUT_MS = 10000;  // Configure your watchdog timeout (milliseconds)
 enum WDTResetReason : uint8_t {
   WDT_REASON_NONE = 0,
   WDT_REASON_TIMEOUT = 1,   // WATCHDOG_REASON_TIMER
@@ -247,7 +245,8 @@ enum WDTResetReason : uint8_t {
   WDT_REASON_MULTIPLE = 3,  // More than one flag set
   WDT_REASON_UNKNOWN = 255
 };                                                   // Map the RP2040 WATCHDOG_REASON bitfield into a simple enum
-static constexpr uint32_t WDT_TIMEOUT_ESCALATE = 3;  // e.g., after 3 consecutive TIMEOUT boots
+static constexpr uint32_t WDT_TIMEOUT_ESCALATE = 3;  // After 3 consecutive TIMEOUT boots
+constexpr uint32_t WDT_TIMEOUT_MS = 1750;            // Configure your watchdog timeout (milliseconds)
 
 // ==================== Boot Animations ====================
 void animateTextToCenterAndCompress(Adafruit_SSD1306& d, const char* text, int startX, int startY, uint16_t moveMs, uint16_t compressMs, float minScaleY, float maxStretchX);
@@ -263,85 +262,36 @@ void setup() {
   } else {
     delay(3000);
   }
-  Serial.printf("\n\r\nRP2040Zero (boot): FW VER: %s\n\r", FW_VERSION);
-  Serial.println("RP2040Zero (boot): Starting now..");
+  Serial.printf("\n\r\nRP2040Zero (BOOT): FW VER: %s\n\r", FW_VERSION);
+  Serial.println("RP2040Zero (BOOT): Starting now..");
 
   // ==================== Watchdog init ====================
   // Read raw reason flags and whether it was a watchdog-caused reboot
+  Serial.println("RP2040Zero (WDT): Initializing WDT...");
   uint32_t raw_reason = watchdog_hw->reason;      // Bitfield from hardware
   bool caused_by_wdt = watchdog_caused_reboot();  // Convenience boolean
-  Serial.println("WDT: Starting...");
-  Serial.print("WDT: watchdog_hw->reason = 0x");
+  Serial.print("RP2040Zero (WDT): watchdog_hw->reason = 0x");
   Serial.println(raw_reason, HEX);
   if (caused_by_wdt) {
     WDTResetReason reason = classify_wdt_reason(raw_reason);
     handle_wdt_reason_switch(reason);
   } else {
-    Serial.println("WDT: Previous reset was not from Watchdog (power-on, reset pin, etc.).");
+    Serial.println("RP2040Zero (WDT): Previous reset was not from Watchdog (power-on, reset pin, etc.).");
   }
   watchdog_update();
   // Start the watchdog; pause_on_debug=true so it won’t reset while halted in a debugger
   watchdog_enable(WDT_TIMEOUT_MS, /*pause_on_debug=*/true);
-  Serial.printf("WDT: Watchdog enabled with %d ms timeout.\n", WDT_TIMEOUT_MS);
-  watchdog_update();
-
-  // ==================== Rotary init ====================
-  pinMode(rotLeft, INPUT_PULLUP);
-  pinMode(rotRight, INPUT_PULLUP);
-  {
-    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
-    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
-    encPrev = (a << 1) | b;
-    encAccum = 0;
-  }
-  watchdog_update();
-
-  // ==================== Button init ====================
-  pinMode(TUNESTEP_PIN, INPUT_PULLUP);
-  pinMode(BAND_PIN, INPUT_PULLUP);
-  pinMode(RX_TX_PIN, INPUT_PULLUP);
-  watchdog_update();
-
-  // ==================== LED init ====================
-  strip.begin();
-  strip.show();
-  strip.setBrightness(64);
-  strip.setPixelColor(0, 64, 64, 64);
-  strip.show();
+  Serial.printf("RP2040Zero (WDT): Watchdog enabled with %d ms timeout.\n", WDT_TIMEOUT_MS);
   watchdog_update();
 
   // ==================== I2C init ====================
+  Serial.println("RP2040Zero (BOOT): Reached I2C init");
   Wire.setClock(1000000);
   Wire.begin();
   watchdog_update();
 
-  // ==================== Tuner init ====================
-  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
-  si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
-  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
-  si5351.output_enable(SI5351_CLK0, 1);
-  si5351.output_enable(SI5351_CLK1, 0);
-  si5351.output_enable(SI5351_CLK2, 0);
-  watchdog_update();
-
-  // ==================== Tuner variables init ====================
-  count = BAND_INIT;
-  bandpresets();
-  stp = STEP_INIT;
-  setstep();
-  watchdog_update();
-
-  // ==================== Config persistent ====================
-  // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
-  // Saved ttyRows/ttyCols/ANSI are already applied to globals.
-  cfgInitAndLoad();
-  watchdog_update();
-
-  // ==================== Peaks persistence ====================
-  peaksInitAndLoad();
-  watchdog_update();
-
   // ==================== Display init ====================
+  Serial.println("RP2040Zero (BOOT): Reached display init");
   display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3C*/);
   display.clearDisplay();
   display.setTextColor(WHITE);
@@ -349,19 +299,13 @@ void setup() {
   display.setTextSize(1);
   watchdog_update();
 
-  // ==================== Boot Animations ====================
-  display.setCursor(0, 0);
-  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
-  watchdog_update();
-  bootExplosion(display, 400);
-  watchdog_update();
-
   // ==================== I2C detection ====================
+  Serial.println("RP2040Zero (BOOT): Reached I2C device detection");
   display.clearDisplay();
   display.setCursor(0, 0);
   display.print("RP2040 I2C device(s):");
   display.setCursor(0, 12);
-  Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
+  Serial.print("RP2040Zero (BOOT): Detected I2C device(s): ");
   int i2cDevsFound = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     watchdog_update();
@@ -382,14 +326,83 @@ void setup() {
     }
   }
   Serial.println();
+  delay(1000);
+  watchdog_update();
+
+  // ==================== LED init ====================
+  Serial.println("RP2040Zero (BOOT): Reached WS2812 init");
+  strip.begin();
+  strip.show();
+  strip.setBrightness(64);
+  strip.setPixelColor(0, 64, 64, 64);
+  strip.show();
+  watchdog_update();
+
+  // ==================== Tuner init ====================
+  Serial.println("RP2040Zero (BOOT): Reached tuner init");
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+  si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+  si5351.output_enable(SI5351_CLK0, 1);
+  si5351.output_enable(SI5351_CLK1, 0);
+  si5351.output_enable(SI5351_CLK2, 0);
+  watchdog_update();
+
+  // ==================== Rotary init ====================
+  Serial.println("RP2040Zero (BOOT): Reached rotary encoder init");
+  pinMode(rotLeft, INPUT_PULLUP);
+  pinMode(rotRight, INPUT_PULLUP);
+  {
+    uint8_t a = (digitalRead(rotRight) == LOW) ? 1 : 0;
+    uint8_t b = (digitalRead(rotLeft) == LOW) ? 1 : 0;
+    encPrev = (a << 1) | b;
+    encAccum = 0;
+  }
+  watchdog_update();
+
+  // ==================== Button init ====================
+  Serial.println("RP2040Zero (BOOT): Reached button pin state init");
+  pinMode(TUNESTEP_PIN, INPUT_PULLUP);
+  pinMode(BAND_PIN, INPUT_PULLUP);
+  pinMode(RX_TX_PIN, INPUT_PULLUP);
+  watchdog_update();
+
+  // ==================== Tuner variables init ====================
+  Serial.println("RP2040Zero (BOOT): Reached tuner variables init");
+  count = BAND_INIT;
+  bandpresets();
+  stp = STEP_INIT;
+  setstep();
+  watchdog_update();
+
+  // ==================== Config persistent ====================
+  // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
+  // Saved ttyRows/ttyCols/ANSI are already applied to globals.
+  Serial.println("RP2040Zero (BOOT): Reached config file persistence");
+  cfgInitAndLoad();
+  watchdog_update();
+
+  // ==================== Peaks persistence ====================
+  Serial.println("RP2040Zero (BOOT): Reached peak file persistence");
+  peaksInitAndLoad();
+  watchdog_update();
+
+  // ==================== Boot Animations ====================
+  Serial.println("RP2040Zero (BOOT): Reached boot animations");
+  display.setCursor(0, 0);
+  animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
+  watchdog_update();
+  bootExplosion(display, 400);
   watchdog_update();
 
   // ==================== Boot process finished ====================
+  Serial.println("RP2040Zero (BOOT): Reached boot finalization stage");
   delay(750);
+  // WS2812 WRGB OLED now indicates successful boot
   strip.setBrightness(32);
   strip.setPixelColor(0, 64, 0, 32);
   strip.show();
-  Serial.print("RP2040Zero (boot): Running loop now..\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
+  Serial.print("RP2040Zero (BOOT): Running loop now..\n\rRP2040Zero (BOOT): HELP | ? | H for help dialog\n\r> ");
   watchdog_update();
 
   // ==================== Boot process finished ====================
@@ -657,7 +670,7 @@ void displayfreq() {
   unsigned int h = (df % 1000UL) / 1UL;
 
   display.clearDisplay();
-  display.setTextSize(5, 7);
+  display.setTextSize(1);
 
   char buffer[15] = "";
   //display.setCursor(5, 1);
@@ -964,44 +977,44 @@ static void cfgFillFromGlobals(CfgV1& c) {
 }
 static bool cfgLoad() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (cfg): LittleFS mount failed\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): LittleFS mount failed\n\r> ");
     return false;
   }
   if (!LittleFS.exists(CFG_PATH)) {
-    Serial.println("\rRP2040Zero (cfg): no config file, using defaults\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): no config file, using defaults\n\r> ");
     return false;
   }
   File f = LittleFS.open(CFG_PATH, "r");
   if (!f) {
-    Serial.println("\rRP2040Zero (cfg): open failed\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): open failed\n\r> ");
     return false;
   }
   CfgV1 c;
   size_t got = f.read((uint8_t*)&c, sizeof(c));
   f.close();
   if (got < offsetof(CfgV1, custom_list)) {
-    Serial.println("\rRP2040Zero (cfg): short read\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): short read\n\r> ");
     return false;
   }
   if (c.magic != CFG_MAGIC || c.ver != CFG_VERSION) {
-    Serial.println("\rRP2040Zero (cfg): bad magic/version\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): bad magic/version\n\r> ");
     return false;
   }
   cfgApply(c);
   sCfgLoaded = true;
-  Serial.println("\rRP2040Zero (cfg): loaded");
+  Serial.printf("\rRP2040Zero (CFG): loaded configuration at: %s\n", CFG_PATH);
   return true;
 }
 static bool cfgSaveNow() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (cfg): FS mount failed (save)\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): FS mount failed (save)\n\r> ");
     return false;
   }
   CfgV1 c;
   cfgFillFromGlobals(c);
   File f = LittleFS.open(CFG_PATH, "w");
   if (!f) {
-    Serial.println("\rRP2040Zero (cfg): open for write failed\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): open for write failed\n\r> ");
     return false;
   }
   size_t want = sizeof(c);
@@ -1009,11 +1022,11 @@ static bool cfgSaveNow() {
   f.flush();
   f.close();
   if (wr != want) {
-    Serial.println("\rRP2040Zero (cfg): short write\n\r> ");
+    Serial.println("\rRP2040Zero (CFG): short write\n\r> ");
     return false;
   }
   sCfgLastSave = millis();
-  Serial.print("\rRP2040Zero (cfg): saved\n\r> ");
+  Serial.print("\rRP2040Zero (CFG): saved\n\r> ");
   return true;
 }
 static void cfgMarkDirty() {
@@ -1782,39 +1795,39 @@ static void peaksFillFromGlobals(PeaksV1& p) {
 }
 static bool peaksLoad() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (peaks): LittleFS mount failed");
+    Serial.println("\rRP2040Zero (PEAKS): LittleFS mount failed");
     return false;
   }
   if (!LittleFS.exists(PEAKS_PATH)) {
-    Serial.println("\rRP2040Zero (peaks): no peaks file");
+    Serial.println("\rRP2040Zero (PEAKS): no peaks file");
     return false;
   }
   File f = LittleFS.open(PEAKS_PATH, "r");
   if (!f) {
-    Serial.println("\rRP2040Zero (peaks): open failed");
+    Serial.println("\rRP2040Zero (PEAKS): open failed");
     return false;
   }
   PeaksV1 p;
   size_t got = f.read((uint8_t*)&p, sizeof(p));
   f.close();
   if (got < sizeof(PeaksV1) || p.magic != PEAKS_MAGIC || p.ver != PEAKS_VERSION) {
-    Serial.println("\rRP2040Zero (peaks): bad file");
+    Serial.println("\rRP2040Zero (PEAKS): bad file");
     return false;
   }
   peaksApply(p);
-  Serial.println("\rRP2040Zero (peaks): loaded");
+  Serial.printf("\rRP2040Zero (PEAKS): loaded peaks history at: %s\n", PEAKS_PATH);
   return true;
 }
 static bool peaksSaveNow() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (peaks): FS mount failed (save)");
+    Serial.println("\rRP2040Zero (PEAKS): FS mount failed (save)");
     return false;
   }
   PeaksV1 p;
   peaksFillFromGlobals(p);
   File f = LittleFS.open(PEAKS_PATH, "w");
   if (!f) {
-    Serial.println("\rRP2040Zero (peaks): open for write failed");
+    Serial.println("\rRP2040Zero (PEAKS): open for write failed");
     return false;
   }
   size_t want = sizeof(p);
@@ -1822,11 +1835,11 @@ static bool peaksSaveNow() {
   f.flush();
   f.close();
   if (wr != want) {
-    Serial.println("\rRP2040Zero (peaks): short write");
+    Serial.println("\rRP2040Zero (PEAKS): short write");
     return false;
   }
   sPeaksLastSave = millis();
-  Serial.println("\rRP2040Zero (peaks): saved");
+  Serial.println("\rRP2040Zero (PEAKS): saved");
   return true;
 }
 static void peaksMarkDirty() {
@@ -1925,6 +1938,7 @@ void animateTextToCenterAndCompress(Adafruit_SSD1306& d,
       d.display();
       delay(dt);
       yield();
+      watchdog_update();
     }
   }
   {
@@ -1940,6 +1954,7 @@ void animateTextToCenterAndCompress(Adafruit_SSD1306& d,
       d.display();
       delay(dt);
       yield();
+      watchdog_update();
     }
   }
 }
@@ -1957,6 +1972,7 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
     d.fillCircle((int)cx, (int)cy, r, WHITE);
     d.display();
     delay(35);
+    watchdog_update();
   }
 
   {
@@ -1973,6 +1989,7 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
       d.display();
       delay(frameDt);
       yield();
+      watchdog_update();
     }
   }
 
@@ -1996,11 +2013,12 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
     p[i].vx = ca * speed;
     p[i].vy = sa * speed;
     p[i].life = 110 + (uint16_t)random(0, 30);
+    watchdog_update();
   }
 
   const float g = 0.039087f;
   const float drag = 0.9999996f;
-  const int frames = 116;
+  const int frames = 120;
   for (int frame = 0; frame < frames; ++frame) {
     d.clearDisplay();
     for (int i = 0; i < N; ++i) {
@@ -2024,6 +2042,7 @@ void bootExplosion(Adafruit_SSD1306& d, uint16_t vibrateMs = 350) {
     d.display();
     delay(16);
     yield();
+    watchdog_update();
   }
 }
 
@@ -2212,7 +2231,7 @@ void handleCommand(const char* line, Stream& io) {
   }
   // ==================== I2C device scanner ====================
   if (!strcmp(line, "I2C?") && fromUSB) {
-    Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
+    Serial.print("RP2040Zero (BOOT): Detected I2C device(s): ");
     int i2cDevsFound = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
       Wire.beginTransmission(addr);
@@ -2529,25 +2548,29 @@ static WDTResetReason classify_wdt_reason(uint32_t raw_reason_bits) {
 static void handle_wdt_reason_switch(WDTResetReason reason) {
   switch (reason) {
     case WDT_REASON_TIMEOUT:
-      Serial.println("WDT: Previous reset was caused by Watchdog TIMEOUT.");
+      Serial.println("RP2040Zero (WDT): Previous reset was caused by Watchdog TIMEOUT.");
       // Count consecutive TIMEOUT boots and escalate if threshold reached
       wdt_timeout_boot_bump_and_maybe_escalate();
+      break;
 
-      break;
     case WDT_REASON_FORCE:
-      Serial.println("WDT: Previous reset was caused by software-forced Watchdog reboot.");
-      // TODO: Handle software-requested reboot case
+      Serial.println("RP2040Zero (WDT): Previous reset was caused by software-forced Watchdog reboot.");
+      // Count consecutive FORCE boots and optionally escalate
+      wdt_force_boot_bump_and_maybe_escalate();
       break;
+
     case WDT_REASON_MULTIPLE:
-      Serial.println("WDT: Previous reset had multiple Watchdog reason flags set.");
-      // TODO: Handle combined flags if needed
-      rp2040.rebootToBootloader();
+      Serial.println("RP2040Zero (WDT): Previous reset had multiple Watchdog reason flags set.");
+      // Count consecutive MULTIPLE-flag boots and optionally escalate
+      wdt_multiple_boot_bump_and_maybe_escalate();
       break;
+
     case WDT_REASON_NONE:
-      Serial.println("WDT: Previous reset was NOT caused by the Watchdog.");
+      Serial.println("RP2040Zero (WDT): Previous reset was NOT caused by the Watchdog.");
       break;
+
     default:
-      Serial.println("WDT: Previous reset reason UNKNOWN.");
+      Serial.println("RP2040Zero (WDT): Previous reset reason UNKNOWN.");
       rp2040.rebootToBootloader();
       break;
   }
@@ -2555,7 +2578,7 @@ static void handle_wdt_reason_switch(WDTResetReason reason) {
 static void force_watchdog_reboot(uint32_t delay_ms = 1) {
   // Optional: call this wherever you want to force a clean software reboot via watchdog
   // This will set the FORCE reason bit and reset after the given delay.
-  Serial.println("WDT: Forcing watchdog reboot...");
+  Serial.println("RP2040Zero (WDT): Forcing watchdog reboot...");
   Serial.flush();
   watchdog_reboot(0, 0, delay_ms);
   while (true) { /* wait for reset */
@@ -2567,13 +2590,26 @@ static inline uint32_t wdt_consecutive_timeouts_get() {
 static inline void wdt_consecutive_timeouts_set(uint32_t v) {
   watchdog_hw->scratch[0] = v;
 }
+static inline uint32_t wdt_consecutive_forces_get() {
+  // Track other consecutive WDT reasons using additional scratch registers
+  return watchdog_hw->scratch[1];
+}
+static inline void wdt_consecutive_forces_set(uint32_t v) {
+  watchdog_hw->scratch[1] = v;
+}
+static inline uint32_t wdt_consecutive_multiple_get() {
+  return watchdog_hw->scratch[2];
+}
+static inline void wdt_consecutive_multiple_set(uint32_t v) {
+  watchdog_hw->scratch[2] = v;
+}
 static void wdt_timeout_boot_bump_and_maybe_escalate() {
   // Call on a boot that was caused by WDT TIMEOUT to bump and, if needed, escalate.
   uint32_t cnt = wdt_consecutive_timeouts_get() + 1;
   wdt_consecutive_timeouts_set(cnt);
-  Serial.printf("\rWDT: consecutive TIMEOUT boots = %lu\n\r", (unsigned long)cnt);
+  Serial.printf("\rRP2040Zero (WDT): consecutive TIMEOUT boots = %lu\n\r", (unsigned long)cnt);
   if (cnt >= WDT_TIMEOUT_ESCALATE) {
-    Serial.println("WDT: threshold reached -> entering BOOTSEL for recovery.");
+    Serial.println("RP2040Zero (WDT): threshold reached -> entering BOOTSEL for recovery.");
     Serial.flush();
     delay(100);
     rp2040.rebootToBootloader();  // or enter your own "safe mode"
@@ -2582,6 +2618,36 @@ static void wdt_timeout_boot_bump_and_maybe_escalate() {
   }
 }
 static void wdt_mark_boot_ok() {
-  // Call once when setup() completes successfully to declare a "good boot"
+  // Declare a clean boot; reset all consecutive counters
   wdt_consecutive_timeouts_set(0);
+  wdt_consecutive_forces_set(0);
+  wdt_consecutive_multiple_set(0);
+}
+static void wdt_force_boot_bump_and_maybe_escalate() {
+  // Call on a boot that was caused by WDT FORCE to bump and, if needed, escalate.
+  uint32_t cnt = wdt_consecutive_forces_get() + 1;
+  wdt_consecutive_forces_set(cnt);
+  Serial.printf("\rRP2040Zero (WDT): consecutive FORCE boots = %lu\n\r", (unsigned long)cnt);
+  if (cnt >= WDT_TIMEOUT_ESCALATE) {
+    Serial.println("RP2040Zero (WDT): FORCE threshold reached -> entering BOOTSEL for recovery.");
+    Serial.flush();
+    delay(100);
+    rp2040.rebootToBootloader();
+    while (true) { /* wait for reset */
+    }
+  }
+}
+static void wdt_multiple_boot_bump_and_maybe_escalate() {
+  // Call on a boot that had MULTIPLE WDT flags to bump and, if needed, escalate.
+  uint32_t cnt = wdt_consecutive_multiple_get() + 1;
+  wdt_consecutive_multiple_set(cnt);
+  Serial.printf("\rRP2040Zero (WDT): consecutive MULTIPLE-flag boots = %lu\n\r", (unsigned long)cnt);
+  if (cnt >= WDT_TIMEOUT_ESCALATE) {
+    Serial.println("RP2040Zero (WDT): MULTIPLE threshold reached -> entering BOOTSEL for recovery.");
+    Serial.flush();
+    delay(100);
+    rp2040.rebootToBootloader();
+    while (true) { /* wait for reset */
+    }
+  }
 }
