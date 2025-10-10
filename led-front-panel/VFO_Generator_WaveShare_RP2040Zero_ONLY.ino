@@ -262,36 +262,36 @@ void setup() {
   } else {
     delay(3000);
   }
-  Serial.printf("\n\r\nRP2040Zero (BOOT): FW VER: %s\n\r", FW_VERSION);
-  Serial.println("RP2040Zero (BOOT): Starting now..");
+  Serial.printf("\n\r\nRP2040Zero (BOOT):\tFW VER: %s\n\r", FW_VERSION);
+  Serial.println("RP2040Zero (BOOT):\tStarting now..");
 
   // ==================== Watchdog init ====================
   // Read raw reason flags and whether it was a watchdog-caused reboot
-  Serial.println("RP2040Zero (WDT): Initializing WDT...");
+  Serial.println("RP2040Zero (WDT):\tInitializing WDT...");
   uint32_t raw_reason = watchdog_hw->reason;      // Bitfield from hardware
   bool caused_by_wdt = watchdog_caused_reboot();  // Convenience boolean
-  Serial.print("RP2040Zero (WDT): watchdog_hw->reason = 0x");
+  Serial.print("RP2040Zero (WDT):\twatchdog_hw->reason = 0x");
   Serial.println(raw_reason, HEX);
   if (caused_by_wdt) {
     WDTResetReason reason = classify_wdt_reason(raw_reason);
     handle_wdt_reason_switch(reason);
   } else {
-    Serial.println("RP2040Zero (WDT): Previous reset was not from Watchdog (power-on, reset pin, etc.).");
+    Serial.println("RP2040Zero (WDT):\tPrevious reset was not from Watchdog (power-on, reset pin, etc.).");
   }
   watchdog_update();
   // Start the watchdog; pause_on_debug=true so it won’t reset while halted in a debugger
   watchdog_enable(WDT_TIMEOUT_MS, /*pause_on_debug=*/true);
-  Serial.printf("RP2040Zero (WDT): Watchdog enabled with %d ms timeout.\n", WDT_TIMEOUT_MS);
+  Serial.printf("RP2040Zero (WDT):\tWatchdog enabled with %d ms timeout.\n", WDT_TIMEOUT_MS);
   watchdog_update();
 
   // ==================== I2C init ====================
-  Serial.println("RP2040Zero (BOOT): Reached I2C init");
+  Serial.println("RP2040Zero (BOOT):\tReached I2C init");
   Wire.setClock(1000000);
   Wire.begin();
   watchdog_update();
 
   // ==================== Display init ====================
-  Serial.println("RP2040Zero (BOOT): Reached display init");
+  Serial.println("RP2040Zero (BOOT):\tReached display init");
   display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3C*/);
   display.clearDisplay();
   display.setTextColor(WHITE);
@@ -300,12 +300,12 @@ void setup() {
   watchdog_update();
 
   // ==================== I2C detection ====================
-  Serial.println("RP2040Zero (BOOT): Reached I2C device detection");
+  Serial.println("RP2040Zero (BOOT):\tReached I2C device detection");
   display.clearDisplay();
   display.setCursor(0, 0);
   display.print("RP2040 I2C device(s):");
   display.setCursor(0, 12);
-  Serial.print("RP2040Zero (BOOT): Detected I2C device(s): ");
+  Serial.print("RP2040Zero (BOOT):\tDetected I2C device(s): ");
   int i2cDevsFound = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     watchdog_update();
@@ -330,7 +330,7 @@ void setup() {
   watchdog_update();
 
   // ==================== LED init ====================
-  Serial.println("RP2040Zero (BOOT): Reached WS2812 init");
+  Serial.println("RP2040Zero (BOOT):\tReached WS2812 init");
   strip.begin();
   strip.show();
   strip.setBrightness(64);
@@ -339,7 +339,7 @@ void setup() {
   watchdog_update();
 
   // ==================== Tuner init ====================
-  Serial.println("RP2040Zero (BOOT): Reached tuner init");
+  Serial.println("RP2040Zero (BOOT):\tReached tuner init");
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
   si5351.set_correction(cal, SI5351_PLL_INPUT_XO);
   si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
@@ -349,7 +349,7 @@ void setup() {
   watchdog_update();
 
   // ==================== Rotary init ====================
-  Serial.println("RP2040Zero (BOOT): Reached rotary encoder init");
+  Serial.println("RP2040Zero (BOOT):\tReached rotary encoder init");
   pinMode(rotLeft, INPUT_PULLUP);
   pinMode(rotRight, INPUT_PULLUP);
   {
@@ -361,14 +361,14 @@ void setup() {
   watchdog_update();
 
   // ==================== Button init ====================
-  Serial.println("RP2040Zero (BOOT): Reached button pin state init");
+  Serial.println("RP2040Zero (BOOT):\tReached button pin state init");
   pinMode(TUNESTEP_PIN, INPUT_PULLUP);
   pinMode(BAND_PIN, INPUT_PULLUP);
   pinMode(RX_TX_PIN, INPUT_PULLUP);
   watchdog_update();
 
   // ==================== Tuner variables init ====================
-  Serial.println("RP2040Zero (BOOT): Reached tuner variables init");
+  Serial.println("RP2040Zero (BOOT):\tReached tuner variables init");
   count = BAND_INIT;
   bandpresets();
   stp = STEP_INIT;
@@ -378,17 +378,17 @@ void setup() {
   // ==================== Config persistent ====================
   // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
   // Saved ttyRows/ttyCols/ANSI are already applied to globals.
-  Serial.println("RP2040Zero (BOOT): Reached config file persistence");
+  Serial.println("RP2040Zero (BOOT):\tReached config file persistence");
   cfgInitAndLoad();
   watchdog_update();
 
   // ==================== Peaks persistence ====================
-  Serial.println("RP2040Zero (BOOT): Reached peak file persistence");
+  Serial.println("RP2040Zero (BOOT):\tReached peak file persistence");
   peaksInitAndLoad();
   watchdog_update();
 
   // ==================== Boot Animations ====================
-  Serial.println("RP2040Zero (BOOT): Reached boot animations");
+  Serial.println("RP2040Zero (BOOT):\tReached boot animations");
   display.setCursor(0, 0);
   animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
   watchdog_update();
@@ -396,13 +396,13 @@ void setup() {
   watchdog_update();
 
   // ==================== Boot process finished ====================
-  Serial.println("RP2040Zero (BOOT): Reached boot finalization stage");
+  Serial.println("RP2040Zero (BOOT):\tReached boot finalization stage");
   delay(750);
   // WS2812 WRGB OLED now indicates successful boot
   strip.setBrightness(32);
   strip.setPixelColor(0, 64, 0, 32);
   strip.show();
-  Serial.print("RP2040Zero (BOOT): Running loop now..\n\rRP2040Zero (BOOT): HELP | ? | H for help dialog\n\r> ");
+  Serial.print("RP2040Zero (BOOT):\tRunning loop now..\n\rRP2040Zero (BOOT):\tHELP | ? | H for help dialog\n\r> ");
   watchdog_update();
 
   // ==================== Boot process finished ====================
@@ -977,44 +977,44 @@ static void cfgFillFromGlobals(CfgV1& c) {
 }
 static bool cfgLoad() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (CFG): LittleFS mount failed\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tLittleFS mount failed\n\r> ");
     return false;
   }
   if (!LittleFS.exists(CFG_PATH)) {
-    Serial.println("\rRP2040Zero (CFG): no config file, using defaults\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tNo config file, using defaults\n\r> ");
     return false;
   }
   File f = LittleFS.open(CFG_PATH, "r");
   if (!f) {
-    Serial.println("\rRP2040Zero (CFG): open failed\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tOpen failed\n\r> ");
     return false;
   }
   CfgV1 c;
   size_t got = f.read((uint8_t*)&c, sizeof(c));
   f.close();
   if (got < offsetof(CfgV1, custom_list)) {
-    Serial.println("\rRP2040Zero (CFG): short read\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tShort read\n\r> ");
     return false;
   }
   if (c.magic != CFG_MAGIC || c.ver != CFG_VERSION) {
-    Serial.println("\rRP2040Zero (CFG): bad magic/version\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tBad magic/version\n\r> ");
     return false;
   }
   cfgApply(c);
   sCfgLoaded = true;
-  Serial.printf("\rRP2040Zero (CFG): loaded configuration at: %s\n", CFG_PATH);
+  Serial.printf("\rRP2040Zero (CFG):\tLoaded configuration at: %s\n", CFG_PATH);
   return true;
 }
 static bool cfgSaveNow() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (CFG): FS mount failed (save)\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tFS mount failed (save)\n\r> ");
     return false;
   }
   CfgV1 c;
   cfgFillFromGlobals(c);
   File f = LittleFS.open(CFG_PATH, "w");
   if (!f) {
-    Serial.println("\rRP2040Zero (CFG): open for write failed\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tOpen for write failed\n\r> ");
     return false;
   }
   size_t want = sizeof(c);
@@ -1022,11 +1022,11 @@ static bool cfgSaveNow() {
   f.flush();
   f.close();
   if (wr != want) {
-    Serial.println("\rRP2040Zero (CFG): short write\n\r> ");
+    Serial.println("\rRP2040Zero (CFG):\tShort write\n\r> ");
     return false;
   }
   sCfgLastSave = millis();
-  Serial.print("\rRP2040Zero (CFG): saved\n\r> ");
+  Serial.print("\rRP2040Zero (CFG):\tSaved\n\r> ");
   return true;
 }
 static void cfgMarkDirty() {
@@ -1795,39 +1795,39 @@ static void peaksFillFromGlobals(PeaksV1& p) {
 }
 static bool peaksLoad() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (PEAKS): LittleFS mount failed");
+    Serial.println("\rRP2040Zero (PEAKS):\tLittleFS mount failed");
     return false;
   }
   if (!LittleFS.exists(PEAKS_PATH)) {
-    Serial.println("\rRP2040Zero (PEAKS): no peaks file");
+    Serial.println("\rRP2040Zero (PEAKS):\tNo peaks file");
     return false;
   }
   File f = LittleFS.open(PEAKS_PATH, "r");
   if (!f) {
-    Serial.println("\rRP2040Zero (PEAKS): open failed");
+    Serial.println("\rRP2040Zero (PEAKS):\tOpen failed");
     return false;
   }
   PeaksV1 p;
   size_t got = f.read((uint8_t*)&p, sizeof(p));
   f.close();
   if (got < sizeof(PeaksV1) || p.magic != PEAKS_MAGIC || p.ver != PEAKS_VERSION) {
-    Serial.println("\rRP2040Zero (PEAKS): bad file");
+    Serial.println("\rRP2040Zero (PEAKS):\tBad file");
     return false;
   }
   peaksApply(p);
-  Serial.printf("\rRP2040Zero (PEAKS): loaded peaks history at: %s\n", PEAKS_PATH);
+  Serial.printf("\rRP2040Zero (PEAKS):\tLoaded peaks history at: %s\n", PEAKS_PATH);
   return true;
 }
 static bool peaksSaveNow() {
   if (!LittleFS.begin()) {
-    Serial.println("\rRP2040Zero (PEAKS): FS mount failed (save)");
+    Serial.println("\rRP2040Zero (PEAKS):\tFS mount failed (save)");
     return false;
   }
   PeaksV1 p;
   peaksFillFromGlobals(p);
   File f = LittleFS.open(PEAKS_PATH, "w");
   if (!f) {
-    Serial.println("\rRP2040Zero (PEAKS): open for write failed");
+    Serial.println("\rRP2040Zero (PEAKS):\tOpen for write failed");
     return false;
   }
   size_t want = sizeof(p);
@@ -1835,11 +1835,11 @@ static bool peaksSaveNow() {
   f.flush();
   f.close();
   if (wr != want) {
-    Serial.println("\rRP2040Zero (PEAKS): short write");
+    Serial.println("\rRP2040Zero (PEAKS):\tShort write");
     return false;
   }
   sPeaksLastSave = millis();
-  Serial.println("\rRP2040Zero (PEAKS): saved");
+  Serial.println("\rRP2040Zero (PEAKS):\tSaved");
   return true;
 }
 static void peaksMarkDirty() {
@@ -2548,29 +2548,29 @@ static WDTResetReason classify_wdt_reason(uint32_t raw_reason_bits) {
 static void handle_wdt_reason_switch(WDTResetReason reason) {
   switch (reason) {
     case WDT_REASON_TIMEOUT:
-      Serial.println("RP2040Zero (WDT): Previous reset was caused by Watchdog TIMEOUT.");
+      Serial.println("RP2040Zero (WDT):\tPrevious reset was caused by Watchdog TIMEOUT.");
       // Count consecutive TIMEOUT boots and escalate if threshold reached
       wdt_timeout_boot_bump_and_maybe_escalate();
       break;
 
     case WDT_REASON_FORCE:
-      Serial.println("RP2040Zero (WDT): Previous reset was caused by software-forced Watchdog reboot.");
+      Serial.println("RP2040Zero (WDT):\tPrevious reset was caused by software-forced Watchdog reboot.");
       // Count consecutive FORCE boots and optionally escalate
       wdt_force_boot_bump_and_maybe_escalate();
       break;
 
     case WDT_REASON_MULTIPLE:
-      Serial.println("RP2040Zero (WDT): Previous reset had multiple Watchdog reason flags set.");
+      Serial.println("RP2040Zero (WDT):\tPrevious reset had multiple Watchdog reason flags set.");
       // Count consecutive MULTIPLE-flag boots and optionally escalate
       wdt_multiple_boot_bump_and_maybe_escalate();
       break;
 
     case WDT_REASON_NONE:
-      Serial.println("RP2040Zero (WDT): Previous reset was NOT caused by the Watchdog.");
+      Serial.println("RP2040Zero (WDT):\tPrevious reset was NOT caused by the Watchdog.");
       break;
 
     default:
-      Serial.println("RP2040Zero (WDT): Previous reset reason UNKNOWN.");
+      Serial.println("RP2040Zero (WDT):\tPrevious reset reason UNKNOWN.");
       rp2040.rebootToBootloader();
       break;
   }
@@ -2578,7 +2578,7 @@ static void handle_wdt_reason_switch(WDTResetReason reason) {
 static void force_watchdog_reboot(uint32_t delay_ms = 1) {
   // Optional: call this wherever you want to force a clean software reboot via watchdog
   // This will set the FORCE reason bit and reset after the given delay.
-  Serial.println("RP2040Zero (WDT): Forcing watchdog reboot...");
+  Serial.println("RP2040Zero (WDT):\tForcing watchdog reboot...");
   Serial.flush();
   watchdog_reboot(0, 0, delay_ms);
   while (true) { /* wait for reset */
@@ -2607,9 +2607,9 @@ static void wdt_timeout_boot_bump_and_maybe_escalate() {
   // Call on a boot that was caused by WDT TIMEOUT to bump and, if needed, escalate.
   uint32_t cnt = wdt_consecutive_timeouts_get() + 1;
   wdt_consecutive_timeouts_set(cnt);
-  Serial.printf("\rRP2040Zero (WDT): consecutive TIMEOUT boots = %lu\n\r", (unsigned long)cnt);
+  Serial.printf("\rRP2040Zero (WDT):\tConsecutive TIMEOUT boots = %lu\n\r", (unsigned long)cnt);
   if (cnt >= WDT_TIMEOUT_ESCALATE) {
-    Serial.println("RP2040Zero (WDT): threshold reached -> entering BOOTSEL for recovery.");
+    Serial.println("RP2040Zero (WDT):\tThreshold reached -> entering BOOTSEL for recovery.");
     Serial.flush();
     delay(100);
     rp2040.rebootToBootloader();  // or enter your own "safe mode"
@@ -2627,9 +2627,9 @@ static void wdt_force_boot_bump_and_maybe_escalate() {
   // Call on a boot that was caused by WDT FORCE to bump and, if needed, escalate.
   uint32_t cnt = wdt_consecutive_forces_get() + 1;
   wdt_consecutive_forces_set(cnt);
-  Serial.printf("\rRP2040Zero (WDT): consecutive FORCE boots = %lu\n\r", (unsigned long)cnt);
+  Serial.printf("\rRP2040Zero (WDT):\tConsecutive FORCE boots = %lu\n\r", (unsigned long)cnt);
   if (cnt >= WDT_TIMEOUT_ESCALATE) {
-    Serial.println("RP2040Zero (WDT): FORCE threshold reached -> entering BOOTSEL for recovery.");
+    Serial.println("RP2040Zero (WDT):\tFORCE threshold reached -> entering BOOTSEL for recovery.");
     Serial.flush();
     delay(100);
     rp2040.rebootToBootloader();
@@ -2641,9 +2641,9 @@ static void wdt_multiple_boot_bump_and_maybe_escalate() {
   // Call on a boot that had MULTIPLE WDT flags to bump and, if needed, escalate.
   uint32_t cnt = wdt_consecutive_multiple_get() + 1;
   wdt_consecutive_multiple_set(cnt);
-  Serial.printf("\rRP2040Zero (WDT): consecutive MULTIPLE-flag boots = %lu\n\r", (unsigned long)cnt);
+  Serial.printf("\rRP2040Zero (WDT):\tConsecutive MULTIPLE-flag boots = %lu\n\r", (unsigned long)cnt);
   if (cnt >= WDT_TIMEOUT_ESCALATE) {
-    Serial.println("RP2040Zero (WDT): MULTIPLE threshold reached -> entering BOOTSEL for recovery.");
+    Serial.println("RP2040Zero (WDT):\tMULTIPLE threshold reached -> entering BOOTSEL for recovery.");
     Serial.flush();
     delay(100);
     rp2040.rebootToBootloader();
