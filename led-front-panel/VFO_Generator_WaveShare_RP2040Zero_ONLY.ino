@@ -4,20 +4,21 @@
 #include <LittleFS.h>           // LittleFS for storing user-tunables
 #include <Wire.h>               // I2C
 #include <math.h>               // Standard math library
-#include <stdarg.h>
-#include <string.h>
-#include "string_switch.h"
+#include "string_switch.h"      // Switch-case for String/char*
 
 // ==================== Defines ====================
-#define FW_VERSION "1.0.8"     // Our firmware version
+#define FW_VERSION "1.1.2"     // Our firmware version
 #define IF 10700               // Inter-Frequency in kHz
 #define BAND_INIT 18           // Initial band preset
 #define STEP_INIT 6            // Initial step size preset
 #define XT_CAL_F 0             // XTAL ppm drift calibration amount
 #define S_GAIN 505             // SM sensitivity: 101=500mv; 202=1v; 303=1.5v; 404=2v; 505=2.5v; 1010=5v (max)
 #define SM_ADC A0              // Signal Meter ADC pin
-#define rotLeft 6              // Rotary-left pin
-#define rotRight 7             // Rotary-right pin
+#define rotLeft 14             // Rotary-left pin
+#define rotRight 13            // Rotary-right pin
+#define BAND_PIN 11            // Band selector push button pin
+#define RX_TX_PIN 10           // RX / TX mode push button pin
+#define TUNESTEP_PIN 9         // Tune step push button pin
 #define LED_PIN 16             // WS2812 LED pin
 #define LED_COUNT 1            // The WaveShare RP2040 Zero only has the one LED
 #define WAIT_USB_SERIAL false  // Wait for a client to connect to USB serial connsole
@@ -59,6 +60,14 @@ static uint32_t uiScanLastMs = 0;              // Last scan cycle in millisecond
 static size_t uiScanIdx = 0;                   // Current list index
 static uint32_t uiScanCurrFreqHz = 0;          // Current scanner frequency in Hertz
 static size_t uiCustomScanLen = 0;             // Length of custom scan list
+static const uint32_t uiHardScanListMURS[] PROGMEM = {
+  // MURS
+  151820000UL,  // 151.820 MHz - MURS Calling (NFM)
+  151880000UL,  // 151.880 MHz - MURS Safety (NFM)
+  151940000UL,  // 151.940 MHz - MURS Emergency (NFM)
+  154570000UL,  // 154.570 MHz - MURS Blue (WFM / old business band)
+  154600000UL   // 154.600 MHz - MURS Green (WFM / old business band)
+};
 static const uint32_t uiHardScanListFM[] PROGMEM = {
   // FM broadcast
   96300000UL,   // 96.3 MHz -
@@ -115,8 +124,8 @@ static const uint32_t uiHardScanListCB[] PROGMEM = {
   27385000UL,  // 27.385 MHz - CB Channel 39
   27405000UL   // 27.405 MHz - CB Channel 40
 };
-static const size_t uiHardScanLen = sizeof(uiHardScanListCB) / sizeof(uiHardScanListCB[0]);  // Hard scan list length
-static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                        // Custom scanner list
+static const size_t uiHardScanLen = sizeof(uiHardScanListMURS) / sizeof(uiHardScanListMURS[0]);  // Hard scan list length
+static uint32_t uiCustomScanList[UI_MAX_CUSTOM_SCAN];                                            // Custom scanner list
 
 // ==================== Terminal TUI ====================
 static bool tuiEnabled = false;                 // TUI master switch
@@ -150,13 +159,13 @@ enum {
   TUI_DIRTY_FULL = 1 << 15
 };
 
-// ==================== Power/DBM sampling constants ====================
-#define ADC_VREF 3.03f       // your original 3.03 reference
-#define SM_INPUT_DIV 0.505f  // 2x opamp gain -> divide measured voltage by 2
-#define DBM_SLOPE 40.0f      // dBm = slope * V + offset -> from your formula
-#define DBM_OFFSET -40.0f
+// ==================== Power/dBm sampling constants ====================
+#define ADC_VREF 3.03f     // your original 3.03 reference
+#define SM_INPUT_DIV 2.0f  // 2x opamp gain -> divide measured voltage by 2
+#define DBM_SLOPE 40.0f    // dBm = slope * V + offset -> from your formula
+#define DBM_OFFSET 0.0f    // dBm offset amount
 
-// ==================== Power/DBM sampling state ====================
+// ==================== Power/dBm sampling state ====================
 static float gSmVolt = 0.0f;       // input voltage at MCU pin (after Vref scaling and divider)
 static float gDbmNow = -99.0f;     // instantaneous dBm (unsmoothed)
 static float gDbmSmooth = -99.0f;  // smoothed dBm for display
@@ -208,8 +217,37 @@ static bool sCfgLoaded = false;                         // is configuration file
 static bool sCfgDirty = false;                          // is configuration file dirty
 static unsigned long sCfgDirtySince = 0;                // time in milliseconds since config was dirty
 static unsigned long sCfgLastSave = 0;                  // time in milliseconds since config was last saved
-static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // minimum gap in milliseconds between writes
-static const unsigned long CFG_DEBOUNCE_MS = 5000;      // delay after last change before saving
+static const unsigned long CFG_MIN_SAVE_GAP_MS = 1500;  // minimum gap in milliseconds between config writes
+static const unsigned long CFG_DEBOUNCE_MS = 5000;      // delay after last change before saving config
+
+// ==================== Peaks persistence (LittleFS) ====================
+static const char* PEAKS_PATH = "/peaks.bin";             // peaks location in flash
+static const uint32_t PEAKS_MAGIC = 0x504B5331;           // 'PKS1'
+static const uint16_t PEAKS_VERSION = 1;                  // peaks file format version
+static bool sPeaksLoaded = false;                         // is peaks file loaded
+static bool sPeaksDirty = false;                          // is peaks file dirty
+static unsigned long sPeaksDirtySince = 0;                // time in milliseconds since peaks were dirty
+static unsigned long sPeaksLastSave = 0;                  // time in milliseconds since peaks were last saved
+static const unsigned long PEAKS_MIN_SAVE_GAP_MS = 1500;  // minimum gap in milliseconds between peaks writes
+static const unsigned long PEAKS_DEBOUNCE_MS = 5000;      // delay after last change before saving peaks
+struct PeaksV1 {
+  uint32_t magic;
+  uint16_t ver;
+  uint8_t scan_src;  // 0=HARD, 1=CUSTOM (metadata only)
+  uint8_t reserved;
+  PeakEntry entries[3];
+};  // peaks file version 1 file format
+
+// ==================== Watchdog timer ====================
+constexpr uint32_t WDT_TIMEOUT_MS = 10000;  // Configure your watchdog timeout (milliseconds)
+enum WDTResetReason : uint8_t {
+  WDT_REASON_NONE = 0,
+  WDT_REASON_TIMEOUT = 1,   // WATCHDOG_REASON_TIMER
+  WDT_REASON_FORCE = 2,     // WATCHDOG_REASON_FORCE (software-forced reboot)
+  WDT_REASON_MULTIPLE = 3,  // More than one flag set
+  WDT_REASON_UNKNOWN = 255
+};                                                   // Map the RP2040 WATCHDOG_REASON bitfield into a simple enum
+static constexpr uint32_t WDT_TIMEOUT_ESCALATE = 3;  // e.g., after 3 consecutive TIMEOUT boots
 
 // ==================== Boot Animations ====================
 void animateTextToCenterAndCompress(Adafruit_SSD1306& d, const char* text, int startX, int startY, uint16_t moveMs, uint16_t compressMs, float minScaleY, float maxStretchX);
@@ -228,6 +266,25 @@ void setup() {
   Serial.printf("\n\r\nRP2040Zero (boot): FW VER: %s\n\r", FW_VERSION);
   Serial.println("RP2040Zero (boot): Starting now..");
 
+  // ==================== Watchdog init ====================
+  // Read raw reason flags and whether it was a watchdog-caused reboot
+  uint32_t raw_reason = watchdog_hw->reason;      // Bitfield from hardware
+  bool caused_by_wdt = watchdog_caused_reboot();  // Convenience boolean
+  Serial.println("WDT: Starting...");
+  Serial.print("WDT: watchdog_hw->reason = 0x");
+  Serial.println(raw_reason, HEX);
+  if (caused_by_wdt) {
+    WDTResetReason reason = classify_wdt_reason(raw_reason);
+    handle_wdt_reason_switch(reason);
+  } else {
+    Serial.println("WDT: Previous reset was not from Watchdog (power-on, reset pin, etc.).");
+  }
+  watchdog_update();
+  // Start the watchdog; pause_on_debug=true so it won’t reset while halted in a debugger
+  watchdog_enable(WDT_TIMEOUT_MS, /*pause_on_debug=*/true);
+  Serial.printf("WDT: Watchdog enabled with %d ms timeout.\n", WDT_TIMEOUT_MS);
+  watchdog_update();
+
   // ==================== Rotary init ====================
   pinMode(rotLeft, INPUT_PULLUP);
   pinMode(rotRight, INPUT_PULLUP);
@@ -237,6 +294,13 @@ void setup() {
     encPrev = (a << 1) | b;
     encAccum = 0;
   }
+  watchdog_update();
+
+  // ==================== Button init ====================
+  pinMode(TUNESTEP_PIN, INPUT_PULLUP);
+  pinMode(BAND_PIN, INPUT_PULLUP);
+  pinMode(RX_TX_PIN, INPUT_PULLUP);
+  watchdog_update();
 
   // ==================== LED init ====================
   strip.begin();
@@ -244,10 +308,12 @@ void setup() {
   strip.setBrightness(64);
   strip.setPixelColor(0, 64, 64, 64);
   strip.show();
+  watchdog_update();
 
   // ==================== I2C init ====================
-  Wire.setClock(100000);
+  Wire.setClock(1000000);
   Wire.begin();
+  watchdog_update();
 
   // ==================== Tuner init ====================
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
@@ -256,17 +322,24 @@ void setup() {
   si5351.output_enable(SI5351_CLK0, 1);
   si5351.output_enable(SI5351_CLK1, 0);
   si5351.output_enable(SI5351_CLK2, 0);
+  watchdog_update();
 
   // ==================== Tuner variables init ====================
   count = BAND_INIT;
   bandpresets();
   stp = STEP_INIT;
   setstep();
+  watchdog_update();
 
-  // ==================== Persistent config ====================
-  cfgInitAndLoad();
+  // ==================== Config persistent ====================
   // Note: We do not auto-enable the TUI at boot even if saved; user can TTY ON.
   // Saved ttyRows/ttyCols/ANSI are already applied to globals.
+  cfgInitAndLoad();
+  watchdog_update();
+
+  // ==================== Peaks persistence ====================
+  peaksInitAndLoad();
+  watchdog_update();
 
   // ==================== Display init ====================
   display.begin(SSD1306_SWITCHCAPVCC, 0x3D /*0x3C*/);
@@ -274,11 +347,14 @@ void setup() {
   display.setTextColor(WHITE);
   display.display();
   display.setTextSize(1);
+  watchdog_update();
 
   // ==================== Boot Animations ====================
   display.setCursor(0, 0);
   animateTextToCenterAndCompress(display, "VFO Generator", 25, 0, 150, 150, 0.3f, 0.025f);
+  watchdog_update();
   bootExplosion(display, 400);
+  watchdog_update();
 
   // ==================== I2C detection ====================
   display.clearDisplay();
@@ -288,6 +364,7 @@ void setup() {
   Serial.print("RP2040Zero (boot): Detected I2C device(s): ");
   int i2cDevsFound = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
+    watchdog_update();
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       if (i2cDevsFound >= 1) {
@@ -305,6 +382,7 @@ void setup() {
     }
   }
   Serial.println();
+  watchdog_update();
 
   // ==================== Boot process finished ====================
   delay(750);
@@ -312,19 +390,33 @@ void setup() {
   strip.setPixelColor(0, 64, 0, 32);
   strip.show();
   Serial.print("RP2040Zero (boot): Running loop now..\n\rRP2040Zero (boot): HELP | ? | H for help dialog\n\r> ");
+  watchdog_update();
+
+  // ==================== Boot process finished ====================
+  wdt_mark_boot_ok();  // <-- reset consecutive TIMEOUT counter on a clean boot
 }
 // ==================== Loop ====================
 void loop() {
+  watchdog_update();  // ==================== Feed the watchdog regularly to prevent a reset ====================
+
   // ==================== Pass USB serial data into our command handler ====================
   if (readLine(Serial, sUsbBuf, sUsbLen, CMD_BUF_SZ)) {
     handleCommand(sUsbBuf, Serial);
   }
+  watchdog_update();
 
-  cfgTick();      // ==================== Flush pending config saves with rate-limits to reduce wear ====================
+  cfgTick();  // ==================== Flush pending config saves with rate-limits to reduce wear ====================
+  watchdog_update();
+  peaksTick();  // ==================== Flush pending peaks saves with rate-limits to reduce wear ====================
+  watchdog_update();
   pollEncoder();  // ==================== Rotary encoder polling ====================
-  uiScanTick();   // ==================== Scanner tick ====================
-  pwrTick();      // ==================== AD8307 meter tick ====================
-  tuiTick();      // ==================== Terminal UI tick ====================
+  watchdog_update();
+  uiScanTick();  // ==================== Scanner tick ====================
+  watchdog_update();
+  pwrTick();  // ==================== AD8307 meter tick ====================
+  watchdog_update();
+  tuiTick();  // ==================== Terminal UI tick ====================
+  watchdog_update();
 
   // ==================== Frequency changed, retune now ====================
   if (freqold != freq) {
@@ -333,6 +425,7 @@ void loop() {
     freqold = freq;
     tuiMarkDirty();  // reflect changes to TUI
   }
+  watchdog_update();
 
   // ==================== Inter-Frequency changed, retune now ====================
   if (interfreqold != interfreq) {
@@ -344,6 +437,7 @@ void loop() {
     interfreqold = interfreq;
     tuiMarkDirty();  // reflect changes to TUI
   }
+  watchdog_update();
 
   // ==================== SM changed, adjust SM now ====================
   if (sigmeterOld != sigmeter) {
@@ -351,6 +445,27 @@ void loop() {
     sigmeterOld = sigmeter;
     tuiMarkDirty();  // reflect changes to TUI
   }
+  watchdog_update();
+
+  if (digitalRead(TUNESTEP_PIN) == LOW) {
+    time_now = (millis() + 175);
+    setstep();
+    delay(175);
+  }
+  watchdog_update();
+
+  if (digitalRead(BAND_PIN) == LOW) {
+    time_now = (millis() + 175);
+    inc_preset();
+    delay(175);
+  }
+  watchdog_update();
+
+  if (digitalRead(RX_TX_PIN) == LOW) {
+    time_now = (millis() + 175);
+    sts = 1;
+  } else sts = 0;
+  watchdog_update();
 
   // ==================== Limit display ticks ====================
   static unsigned long lastDraw = 0;     // last time since redraw in milliseconds
@@ -358,36 +473,10 @@ void loop() {
   if (millis() - lastDraw >= drawPeriod) {
     lastDraw = millis();
     displayfreq();
+    watchdog_update();
     layout();
+    watchdog_update();
   }
-
-  /*float sensorValue = analogRead(SM_ADC);          // Read analog input on SM_ADC
-  float voltage1 = sensorValue * (3.03 / 1023.0);  // Convert analog reading to voltage
-  float voltage = voltage1 / 2;                    // Divide by 2 because of 2x opamp on input
-  // Calculate dBm, power in uW, mW, and W
-  double dBm = (40 * voltage - 40);
-  double Pu = pow(10.0, (dBm + 30) / 10.0);
-  double Pm = pow(10.0, dBm / 10.0);
-  double Pw = pow(10.0, (dBm - 30) / 10.0);
-  // Print voltage and dBm on the Serial monitor
-  Serial.printf("Volt: %.2f\tdBm: %.2f\t(", voltage, dBm);
-  if (dBm <= 0) {
-    // If dBm is less than or equal to 0, display power in uW
-    Serial.printf("%.2f", Pu);
-    if (dBm <= 0) {
-      Serial.println("\tuW)");
-    }
-  } else if (dBm >= 30) {
-    // If dBm is greater than or equal to 30, display power in W
-    Serial.printf("%.2f", Pw);
-    if (dBm >= 30) {
-      Serial.println("\tW)");
-    }
-  } else {
-    // Otherwise, display power in mW
-    Serial.printf("%.2f", Pm);
-    Serial.println("\tmW)");
-  }*/
 }
 
 // ==================== UI Scanner ====================
@@ -395,7 +484,7 @@ static inline size_t uiCurrentListLen() {
   return uiScanSrc ? uiCustomScanLen : uiHardScanLen;
 }
 static inline const uint32_t* uiCurrentListPtr() {
-  return uiScanSrc ? uiCustomScanList : uiHardScanListCB;
+  return uiScanSrc ? uiCustomScanList : uiHardScanListMURS;
 }
 static inline const uint32_t* uiCurrentListPtr(const String& band) {
   // String overload
@@ -565,9 +654,11 @@ void displayfreq() {
   unsigned int h = (df % 1000UL) / 1UL;
 
   display.clearDisplay();
-  display.setTextSize(2);
+  display.setTextSize(5, 7);
 
   char buffer[15] = "";
+  //display.setCursor(5, 1);
+  //sprintf(buffer, "%2d.%003d.%003d", m, k, h);
   if (m < 1) {
     display.setCursor(41, 1);
     sprintf(buffer, "%003d.%003d", k, h);
@@ -593,11 +684,11 @@ void setstep() {
       break;
     case 3:
       stp = 4;
-      fstep = 1000;
+      fstep = 100;
       break;
     case 4:
       stp = 5;
-      fstep = 5000;
+      fstep = 1000;
       break;
     case 5:
       stp = 6;
@@ -652,26 +743,50 @@ void bandpresets() {
 }
 void layout() {
   display.setTextColor(WHITE);
-  display.drawLine(0, 20, 127, 20, WHITE);
-  display.drawLine(0, 43, 127, 43, WHITE);
-  display.drawLine(105, 24, 105, 39, WHITE);
-  display.drawLine(87, 24, 87, 39, WHITE);
-  display.drawLine(87, 48, 87, 63, WHITE);
-  display.drawLine(15, 55, 82, 55, WHITE);
+  //display.drawLine(0, 20, 127, 20, WHITE);
+  //display.drawLine(0, 43, 127, 43, WHITE);
+  //display.drawLine(105, 24, 105, 39, WHITE);
+  //display.drawLine(87, 24, 87, 39, WHITE);
+  //display.drawLine(87, 48, 87, 63, WHITE);
+  //display.drawLine(15, 55, 82, 55, WHITE);
   display.setTextSize(1);
-  display.setCursor(59, 23);
-  display.print("STEP");
+  //display.setCursor(59, 23);
+  //display.print("STEP");
   display.setCursor(51, 33);
-  if (stp == 2) display.print("  1Hz");
-  if (stp == 3) display.print(" 10Hz");
-  if (stp == 4) display.print(" 1kHz");
-  if (stp == 5) display.print(" 5kHz");
-  if (stp == 6) display.print("10kHz");
-  if (stp == 7) display.print("100kHz");
-  if (stp == 8) display.print(" 1MHz");
-  if (stp == 1) display.print(" 10MHz");
+  if (stp == 2) {
+    display.print("  1Hz");
+    display.drawLine(114, 17, 122, 17, WHITE);
+  }
+  if (stp == 3) {
+    display.print(" 10Hz");
+    display.drawLine(102, 17, 110, 17, WHITE);
+  }
+  if (stp == 4) {
+    display.print(" 100Hz");
+    display.drawLine(78, 17, 86, 17, WHITE);
+  }
+  if (stp == 5) {
+    display.print(" 1kHz");
+    display.drawLine(66, 17, 74, 17, WHITE);
+  }
+  if (stp == 6) {
+    display.print("10kHz");
+    display.drawLine(54, 17, 62, 17, WHITE);
+  }
+  if (stp == 7) {
+    display.print("100kHz");
+    display.drawLine(30, 17, 38, 17, WHITE);
+  }
+  if (stp == 8) {
+    display.print(" 1MHz");
+    display.drawLine(18, 17, 26, 17, WHITE);
+  }
+  if (stp == 1) {
+    display.print(" 10MHz");
+    display.drawLine(6, 17, 14, 17, WHITE);
+  }
 
-  display.setTextSize(1);
+  /*display.setTextSize(1);
   display.setCursor(92, 48);
   display.print("IF:");
   display.setCursor(92, 57);
@@ -684,7 +799,7 @@ void layout() {
   if (freq >= 1000000) display.print("MHz");
   display.setCursor(110, 33);
   if (interfreq == 0) display.print("VFO");
-  if (interfreq != 0) display.print("L O");
+  if (interfreq != 0) display.print("L O");*/
 
   display.setCursor(91, 28);
   if (!sts) display.print("RX");
@@ -698,7 +813,7 @@ void layout() {
   display.display();
 }
 void bandlist() {
-  display.setTextSize(2);
+  /*display.setTextSize(2);
   display.setCursor(0, 25);
   if (count == 1) display.print("GEN");
   if (count == 2) display.print("MW");
@@ -720,7 +835,7 @@ void bandlist() {
   if (count == 18) display.print("WFM");
   if (count == 19) display.print("AIR");
   if (count == 20) display.print("2m");
-  if (count == 21) display.print("1m");
+  if (count == 21) display.print("1m");*/
   if (count == 1) interfreq = 0;
   else if (!sts) interfreq = IF;
 }
@@ -731,11 +846,10 @@ void drawbargraph() {
   // show dBm and power (using smoothed shared state)
   display.setCursor(0, 46);
   display.print(gDbmSmooth, 1);  // dBm value, 1 decimal
-  display.print(" dBm (");
+  display.print("dBm ");
   display.print(gPowerStr);  // compact power string
-  display.print(")");
 
-  display.setCursor(0, 57);
+  /*display.setCursor(0, 57);
   display.print("SM");
   switch (sigmeter) {
     case 14: display.fillRect(80, 58, 2, 6, WHITE);
@@ -753,7 +867,7 @@ void drawbargraph() {
     case 2: display.fillRect(20, 58, 2, 6, WHITE);
     case 1: display.fillRect(15, 58, 2, 6, WHITE);
     default: display.fillRect(15, 58, 2, 6, WHITE);
-  }
+  }*/
 }
 
 static inline unsigned long stepIndexToFstep(uint8_t stpIdx) {
@@ -1085,7 +1199,7 @@ static void drawHeader(Stream& s) {
   formatFreqSmart(uiDisplayFreqHz(), fbuf, sizeof(fbuf));
   // Trim text if longer than panel width
   char hdr[96];
-  snprintf(hdr, sizeof(hdr), " RP2040 VFO + VFO Scanner | %s | Mode: %s ", fbuf, (sts ? "TX" : "RX"));
+  snprintf(hdr, sizeof(hdr), "  RP2040 VFO + VFO Scanner | %s | Mode: %s  ", fbuf, (sts ? "TX" : "RX"));
   size_t len = strlen(hdr);
   if (len > tuiPanelW) hdr[tuiPanelW] = '\0';
   s.print(hdr);
@@ -1173,7 +1287,7 @@ static void drawFreqBlock(Stream& s) {
 static void drawBars(Stream& s) {
   const uint16_t px = tuiPanelX();
   // TU bar (n mapped 1..42 -> 1..14)
-  byte tu = map(n, 1, 42, 1, 14);
+  /*byte tu = map(n, 1, 42, 1, 14);
   clearRegion(s, 9, px, tuiPanelW);
   vtMove(s, 9, px);
   s.print("TU ");
@@ -1183,7 +1297,7 @@ static void drawBars(Stream& s) {
   clearRegion(s, 10, px, tuiPanelW);
   vtMove(s, 10, px);
   s.print("SM ");
-  for (int i = 1; i <= 14; ++i) s.print(i <= sigmeter ? '|' : '.');
+  for (int i = 1; i <= 14; ++i) s.print(i <= sigmeter ? '|' : '.');*/
 
   // PWR bar + numeric readout (dbm + compact power)
   clearRegion(s, 11, px, tuiPanelW);
@@ -1191,9 +1305,9 @@ static void drawBars(Stream& s) {
   s.print("PWR ");
   for (int i = 1; i <= 14; ++i) s.print(i <= gPwrBar ? '|' : '.');
 
-  // trailing text: "  -12.3 dBm (123.45uW)" etc.
+  // trailing text: "  -12.3dBm 123.45uW" etc.
   char tail[64];
-  snprintf(tail, sizeof(tail), "  %.1f dBm (%s)", (double)gDbmSmooth, gPowerStr);
+  snprintf(tail, sizeof(tail), "  %.1fdBm %s", (double)gDbmSmooth, gPowerStr);
   s.print(tail);
 }
 static void drawLog(Stream& s) {
@@ -1571,10 +1685,8 @@ static void scanPeaksReset() {
   gScanPeaksNeedsSave = false;
 }
 static void peaksMaybePersist(const PeakEntry& e) {
-  // Placeholder for future flash write. Intentionally no-op for now.
-  // Example for future:
-  //   - mark config dirty or write a dedicated "peaks" file on LittleFS
-  (void)e;
+  (void)e;           // not needed right now; we save the full 3-entry block
+  peaksMarkDirty();  // schedule a debounced save of /peaks.bin
 }
 static void formatPowerShort(float dbm, float watts, char* out, size_t outSz) {
   // mirror OLED/TUI compact unit logic
@@ -1650,6 +1762,84 @@ static void scanPeaksConsider(uint16_t currIdx, uint32_t freqHz, float dbm, floa
     gScanPeaksNeedsSave = true;        // for future storage hook
     peaksMaybePersist(gScanPeaks[0]);  // optional: persist only top-1 on change, or the changed entry
     tuiMarkDirty();                    // refresh TUI to reflect new peaks
+  }
+}
+static void peaksApply(const PeaksV1& p) {
+  // copy entries into RAM table
+  for (int i = 0; i < 3; ++i) gScanPeaks[i] = p.entries[i];
+  sPeaksLoaded = true;
+}
+static void peaksFillFromGlobals(PeaksV1& p) {
+  memset(&p, 0, sizeof(p));
+  p.magic = PEAKS_MAGIC;
+  p.ver = PEAKS_VERSION;
+  p.scan_src = uiScanSrc ? 1 : 0;  // save current source as metadata
+  for (int i = 0; i < 3; ++i) p.entries[i] = gScanPeaks[i];
+}
+static bool peaksLoad() {
+  if (!LittleFS.begin()) {
+    Serial.println("\rRP2040Zero (peaks): LittleFS mount failed");
+    return false;
+  }
+  if (!LittleFS.exists(PEAKS_PATH)) {
+    Serial.println("\rRP2040Zero (peaks): no peaks file");
+    return false;
+  }
+  File f = LittleFS.open(PEAKS_PATH, "r");
+  if (!f) {
+    Serial.println("\rRP2040Zero (peaks): open failed");
+    return false;
+  }
+  PeaksV1 p;
+  size_t got = f.read((uint8_t*)&p, sizeof(p));
+  f.close();
+  if (got < sizeof(PeaksV1) || p.magic != PEAKS_MAGIC || p.ver != PEAKS_VERSION) {
+    Serial.println("\rRP2040Zero (peaks): bad file");
+    return false;
+  }
+  peaksApply(p);
+  Serial.println("\rRP2040Zero (peaks): loaded");
+  return true;
+}
+static bool peaksSaveNow() {
+  if (!LittleFS.begin()) {
+    Serial.println("\rRP2040Zero (peaks): FS mount failed (save)");
+    return false;
+  }
+  PeaksV1 p;
+  peaksFillFromGlobals(p);
+  File f = LittleFS.open(PEAKS_PATH, "w");
+  if (!f) {
+    Serial.println("\rRP2040Zero (peaks): open for write failed");
+    return false;
+  }
+  size_t want = sizeof(p);
+  size_t wr = f.write((const uint8_t*)&p, want);
+  f.flush();
+  f.close();
+  if (wr != want) {
+    Serial.println("\rRP2040Zero (peaks): short write");
+    return false;
+  }
+  sPeaksLastSave = millis();
+  Serial.println("\rRP2040Zero (peaks): saved");
+  return true;
+}
+static void peaksMarkDirty() {
+  sPeaksDirty = true;
+  sPeaksDirtySince = millis();
+}
+static void peaksInitAndLoad() {
+  (void)peaksLoad();  // ok to fail; keep RAM defaults
+  sPeaksDirty = false;
+  sPeaksDirtySince = 0;
+  sPeaksLastSave = 0;
+}
+static void peaksTick() {
+  if (!sPeaksDirty) return;
+  unsigned long now = millis();
+  if ((now - sPeaksDirtySince) >= PEAKS_DEBOUNCE_MS && (now - sPeaksLastSave) >= PEAKS_MIN_SAVE_GAP_MS) {
+    if (peaksSaveNow()) sPeaksDirty = false;
   }
 }
 
@@ -2320,4 +2510,74 @@ void handleCommand(const char* line, Stream& io) {
     termPrompt();
   }
   tuiMarkDirty();
+}
+
+// ==================== Watchdog handlers ====================
+static WDTResetReason classify_wdt_reason(uint32_t raw_reason_bits) {
+  bool timeout = (raw_reason_bits & WATCHDOG_REASON_TIMER_BITS) != 0;
+  bool force = (raw_reason_bits & WATCHDOG_REASON_FORCE_BITS) != 0;
+
+  if (!timeout && !force) return WDT_REASON_NONE;
+  if (timeout && !force) return WDT_REASON_TIMEOUT;
+  if (!timeout && force) return WDT_REASON_FORCE;
+  return WDT_REASON_MULTIPLE;
+}
+static void handle_wdt_reason_switch(WDTResetReason reason) {
+  switch (reason) {
+    case WDT_REASON_TIMEOUT:
+      Serial.println("WDT: Previous reset was caused by Watchdog TIMEOUT.");
+      // Count consecutive TIMEOUT boots and escalate if threshold reached
+      wdt_timeout_boot_bump_and_maybe_escalate();
+
+      break;
+    case WDT_REASON_FORCE:
+      Serial.println("WDT: Previous reset was caused by software-forced Watchdog reboot.");
+      // TODO: Handle software-requested reboot case
+      break;
+    case WDT_REASON_MULTIPLE:
+      Serial.println("WDT: Previous reset had multiple Watchdog reason flags set.");
+      // TODO: Handle combined flags if needed
+      rp2040.rebootToBootloader();
+      break;
+    case WDT_REASON_NONE:
+      Serial.println("WDT: Previous reset was NOT caused by the Watchdog.");
+      break;
+    default:
+      Serial.println("WDT: Previous reset reason UNKNOWN.");
+      rp2040.rebootToBootloader();
+      break;
+  }
+}
+static void force_watchdog_reboot(uint32_t delay_ms = 1) {
+  // Optional: call this wherever you want to force a clean software reboot via watchdog
+  // This will set the FORCE reason bit and reset after the given delay.
+  Serial.println("WDT: Forcing watchdog reboot...");
+  Serial.flush();
+  watchdog_reboot(0, 0, delay_ms);
+  while (true) { /* wait for reset */
+  }
+}
+static inline uint32_t wdt_consecutive_timeouts_get() {
+  return watchdog_hw->scratch[0];
+}
+static inline void wdt_consecutive_timeouts_set(uint32_t v) {
+  watchdog_hw->scratch[0] = v;
+}
+static void wdt_timeout_boot_bump_and_maybe_escalate() {
+  // Call on a boot that was caused by WDT TIMEOUT to bump and, if needed, escalate.
+  uint32_t cnt = wdt_consecutive_timeouts_get() + 1;
+  wdt_consecutive_timeouts_set(cnt);
+  Serial.printf("\rWDT: consecutive TIMEOUT boots = %lu\n\r", (unsigned long)cnt);
+  if (cnt >= WDT_TIMEOUT_ESCALATE) {
+    Serial.println("WDT: threshold reached -> entering BOOTSEL for recovery.");
+    Serial.flush();
+    delay(100);
+    rp2040.rebootToBootloader();  // or enter your own "safe mode"
+    while (true) {                /* wait for reset */
+    }
+  }
+}
+static void wdt_mark_boot_ok() {
+  // Call once when setup() completes successfully to declare a "good boot"
+  wdt_consecutive_timeouts_set(0);
 }
